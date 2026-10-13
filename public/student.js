@@ -1,9 +1,7 @@
 /**
- * API Controller via Vercel Serverless Edge
+ * ASPECT — Password Authentication, Student Self-Registration & Results Controller
  */
 const API_BASE_URL = window.ASPECT_CONFIG?.API_URL || '/api';
-
-
 
 let currentUser = null;
 let sessionToken = localStorage.getItem('aspect_token') || null;
@@ -34,46 +32,49 @@ function toggleTheme() {
   }
 }
 
-function openAuthModal() {
-  showInputStep();
-  clearAuthAlert();
+function openAuthModal(mode = 'login') {
+  switchAuthMode(mode);
   if (authModal) authModal.show();
 }
 
-function showOtpStep(studentId) {
-  document.getElementById('step-inputs').classList.add('d-none');
-  document.getElementById('step-otp').classList.remove('d-none');
-  document.getElementById('modal-subtext').innerText = "Enter the 6-digit code to complete verification.";
-  const idBadge = document.getElementById('otp-id-badge');
-  if (idBadge) idBadge.innerText = `ID: ${studentId || document.getElementById('auth-id').value.trim()}`;
-  const otpInput = document.getElementById('auth-otp');
-  otpInput.value = "";
-  setTimeout(() => otpInput.focus(), 150);
-}
+function switchAuthMode(mode) {
+  clearAuthAlert();
+  const loginForm = document.getElementById('form-login');
+  const regForm = document.getElementById('form-register');
+  const btnLoginTab = document.getElementById('tab-btn-login');
+  const btnRegTab = document.getElementById('tab-btn-register');
 
-function showDirectOtpPrompt() {
-  const id = document.getElementById('auth-id').value.trim();
-  if (!id) {
-    setAuthAlert('Please enter your ID Number first.');
-    document.getElementById('auth-id').focus();
-    return;
+  if (mode === 'register') {
+    loginForm.classList.add('d-none');
+    regForm.classList.remove('d-none');
+    btnLoginTab.classList.remove('active');
+    btnRegTab.classList.add('active');
+    setTimeout(() => document.getElementById('reg-id')?.focus(), 150);
+  } else {
+    regForm.classList.add('d-none');
+    loginForm.classList.remove('d-none');
+    btnRegTab.classList.remove('active');
+    btnLoginTab.classList.add('active');
+    setTimeout(() => document.getElementById('auth-id')?.focus(), 150);
   }
-  clearAuthAlert();
-  showOtpStep(id);
 }
 
-function showInputStep() {
-  document.getElementById('step-otp').classList.add('d-none');
-  document.getElementById('step-inputs').classList.remove('d-none');
-  document.getElementById('modal-subtext').innerText = "Enter your Student or Faculty ID number.";
-  clearAuthAlert();
-  const idInput = document.getElementById('auth-id');
-  setTimeout(() => idInput.focus(), 150);
+function togglePasswordVisibility(inputId, iconId) {
+  const pwdInput = document.getElementById(inputId);
+  const eyeIcon = document.getElementById(iconId);
+  if (!pwdInput) return;
+  if (pwdInput.type === 'password') {
+    pwdInput.type = 'text';
+    if (eyeIcon) eyeIcon.className = 'bi bi-eye-slash';
+  } else {
+    pwdInput.type = 'password';
+    if (eyeIcon) eyeIcon.className = 'bi bi-eye';
+  }
 }
 
 function setAuthAlert(message, type = 'danger') {
   const el = document.getElementById('auth-alert');
-  el.className = `alert alert-${type} py-1.5 px-2 small mb-3`;
+  el.className = `alert alert-${type} py-1.5 px-2 small mb-3 text-center`;
   el.innerText = message;
   el.classList.remove('d-none');
 }
@@ -97,13 +98,6 @@ window.addEventListener('DOMContentLoaded', () => {
   const modalEl = document.getElementById('auth-modal');
   if (modalEl) authModal = new bootstrap.Modal(modalEl);
 
-  document.getElementById('auth-id').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); requestOTP(); }
-  });
-  document.getElementById('auth-otp').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); verifyOTP(); }
-  });
-
   if (sessionToken) {
     callApi({ action: 'VALIDATE_SESSION', sessionToken: sessionToken })
       .then(res => {
@@ -126,48 +120,24 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 });
 
-async function requestOTP() {
+async function loginWithPassword(e) {
+  if (e) e.preventDefault();
   const id = document.getElementById('auth-id').value.trim();
-  if (!id) return setAuthAlert('Please enter your Student or Faculty ID.');
+  const password = document.getElementById('auth-password').value;
 
-  clearAuthAlert();
-  const btn = document.getElementById('btn-otp');
-  btn.disabled = true;
-  btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Checking ID...`;
-
-  try {
-    const res = await callApi({ action: 'SEND_OTP', studentId: id });
-    btn.disabled = false;
-    btn.innerHTML = `<i class="bi bi-arrow-right-circle me-1"></i> Continue`;
-
-    if (res.success) {
-      showOtpStep(id);
-      if (res.devOtp) setAuthAlert(`Code generated: ${res.devOtp}`, 'info');
-      else if (res.message) setAuthAlert(res.message, 'success');
-    } else {
-      setAuthAlert(res.message || `ID "${id}" not found.`);
-    }
-  } catch (err) {
-    btn.disabled = false;
-    btn.innerHTML = `<i class="bi bi-arrow-right-circle me-1"></i> Continue`;
-    setAuthAlert('Connection error while contacting server.');
+  if (!id || !password) {
+    return setAuthAlert('Please enter both your ID and password.');
   }
-}
-
-async function verifyOTP() {
-  const id = document.getElementById('auth-id').value.trim();
-  const otp = document.getElementById('auth-otp').value.trim();
-  if (!otp) return setAuthAlert('Please enter the 6-digit OTP code.');
 
   clearAuthAlert();
-  const btn = document.getElementById('btn-verify');
+  const btn = document.getElementById('btn-login');
   btn.disabled = true;
-  btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Verifying...`;
+  btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Signing In...`;
 
   try {
-    const res = await callApi({ action: 'VERIFY_OTP', studentId: id, otp: otp });
+    const res = await callApi({ action: 'LOGIN', studentId: id, password: password });
     btn.disabled = false;
-    btn.innerHTML = `<i class="bi bi-check-circle me-1"></i> Verify & Sign In`;
+    btn.innerHTML = `<i class="bi bi-box-arrow-in-right me-1"></i> Sign In`;
 
     if (res.success) {
       sessionToken = res.sessionToken;
@@ -181,12 +151,58 @@ async function verifyOTP() {
         initStudentDashboard();
       }
     } else {
-      setAuthAlert(res.message || 'Invalid or expired OTP code.');
+      setAuthAlert(res.message || 'Invalid ID or password.');
     }
   } catch (err) {
     btn.disabled = false;
-    btn.innerHTML = `<i class="bi bi-check-circle me-1"></i> Verify & Sign In`;
-    setAuthAlert('Verification error: ' + err);
+    btn.innerHTML = `<i class="bi bi-box-arrow-in-right me-1"></i> Sign In`;
+    setAuthAlert('Connection error while contacting server.');
+  }
+}
+
+async function registerStudent(e) {
+  if (e) e.preventDefault();
+  const studentId = document.getElementById('reg-id').value.trim();
+  const fullName = document.getElementById('reg-name').value.trim();
+  const section = document.getElementById('reg-section').value.trim();
+  const email = document.getElementById('reg-email').value.trim();
+  const password = document.getElementById('reg-password').value;
+
+  if (!studentId || !fullName || !section || !password) {
+    return setAuthAlert('Please fill out all required fields.');
+  }
+
+  clearAuthAlert();
+  const btn = document.getElementById('btn-register');
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Registering...`;
+
+  try {
+    const res = await callApi({
+      action: 'REGISTER_STUDENT',
+      studentId,
+      fullName,
+      section,
+      email,
+      password
+    });
+
+    btn.disabled = false;
+    btn.innerHTML = `<i class="bi bi-person-check-fill me-1"></i> Complete Registration`;
+
+    if (res.success) {
+      sessionToken = res.sessionToken;
+      currentUser = res.user;
+      localStorage.setItem('aspect_token', sessionToken);
+      if (authModal) authModal.hide();
+      initStudentDashboard();
+    } else {
+      setAuthAlert(res.message || 'Registration failed.');
+    }
+  } catch (err) {
+    btn.disabled = false;
+    btn.innerHTML = `<i class="bi bi-person-check-fill me-1"></i> Complete Registration`;
+    setAuthAlert('Connection error while registering.');
   }
 }
 

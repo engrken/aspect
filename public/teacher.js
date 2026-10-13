@@ -1,5 +1,5 @@
 /**
- * API Controller via Vercel Serverless Edge
+ * ASPECT — Faculty Hub & System Admin Controller
  */
 const API_BASE_URL = window.ASPECT_CONFIG?.API_URL || '/api';
 
@@ -72,6 +72,111 @@ function updateThemeIcon(theme) {
   if (!icon) return;
   icon.className = theme === 'dark' ? 'bi bi-sun-fill text-warning' : 'bi bi-moon-stars-fill';
 }
+
+// --- PASSWORD MANAGEMENT ---
+
+function openChangePasswordModal() {
+  document.getElementById('new-self-password').value = '';
+  new bootstrap.Modal(document.getElementById('password-modal')).show();
+}
+
+async function handleChangePassword(e) {
+  e.preventDefault();
+  const newPassword = document.getElementById('new-self-password').value;
+  const res = await callApi({ action: 'CHANGE_PASSWORD', sessionToken, newPassword });
+  if (res.success) {
+    bootstrap.Modal.getInstance(document.getElementById('password-modal')).hide();
+    alert("Your password has been updated!");
+  } else {
+    alert("Error: " + res.message);
+  }
+}
+
+// --- FACULTY ACCOUNTS MANAGEMENT ---
+
+async function loadFacultyList() {
+  const tbody = document.getElementById('faculty-table-body');
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="5" class="text-center py-4 text-body-secondary">Loading...</td></tr>';
+
+  const res = await callApi({ action: 'GET_FACULTY', sessionToken });
+  tbody.innerHTML = '';
+
+  if (!res.success || !res.faculty || res.faculty.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" class="text-center py-4 text-body-secondary">No faculty accounts found.</td></tr>';
+    return;
+  }
+
+  res.faculty.forEach(f => {
+    const isPrimaryAdmin = f.facultyId === 'FACULTY-01';
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="font-monospace fw-bold">${f.facultyId} ${isPrimaryAdmin ? '<span class="badge bg-primary ms-1">ADMIN</span>' : ''}</td>
+      <td class="fw-semibold">${f.fullName}</td>
+      <td>${f.department || '—'}</td>
+      <td>${f.email || '—'}</td>
+      <td class="text-center">
+        <button class="btn btn-sm btn-outline-secondary me-1" onclick="openEditFacultyModal('${f.facultyId}', '${f.fullName.replace(/'/g, "\\'")}', '${(f.department || '').replace(/'/g, "\\'")}', '${f.email || ''}')" title="Reset Password / Edit">
+          <i class="bi bi-pencil"></i>
+        </button>
+        ${!isPrimaryAdmin ? `<button class="btn btn-sm btn-outline-danger" onclick="deleteFaculty('${f.facultyId}')" title="Remove"><i class="bi bi-trash"></i></button>` : ''}
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function openFacultyModal() {
+  document.getElementById('fac-id').value = '';
+  document.getElementById('fac-id').readOnly = false;
+  document.getElementById('fac-name').value = '';
+  document.getElementById('fac-dept').value = 'College of Engineering';
+  document.getElementById('fac-email').value = '';
+  document.getElementById('fac-password').value = '';
+  new bootstrap.Modal(document.getElementById('faculty-modal')).show();
+}
+
+function openEditFacultyModal(id, name, dept, email) {
+  document.getElementById('fac-id').value = id;
+  document.getElementById('fac-id').readOnly = true;
+  document.getElementById('fac-name').value = name;
+  document.getElementById('fac-dept').value = dept || 'College of Engineering';
+  document.getElementById('fac-email').value = email || '';
+  document.getElementById('fac-password').value = '';
+  new bootstrap.Modal(document.getElementById('faculty-modal')).show();
+}
+
+async function handleSaveFaculty(e) {
+  e.preventDefault();
+  const facultyData = {
+    facultyId: document.getElementById('fac-id').value.trim(),
+    fullName: document.getElementById('fac-name').value.trim(),
+    department: document.getElementById('fac-dept').value.trim(),
+    email: document.getElementById('fac-email').value.trim(),
+    password: document.getElementById('fac-password').value
+  };
+
+  const res = await callApi({ action: 'REGISTER_FACULTY', sessionToken, facultyData });
+  if (res.success) {
+    bootstrap.Modal.getInstance(document.getElementById('faculty-modal')).hide();
+    await loadFacultyList();
+    alert(res.message);
+  } else {
+    alert("Error saving faculty: " + res.message);
+  }
+}
+
+async function deleteFaculty(facultyId) {
+  if (!confirm(`Remove faculty account "${facultyId}"?`)) return;
+  const res = await callApi({ action: 'DELETE_FACULTY', sessionToken, facultyId });
+  if (res.success) {
+    await loadFacultyList();
+  } else {
+    alert("Error: " + res.message);
+  }
+}
+
+// --- SUBJECTS & CLASSES ---
 
 async function loadClasses() {
   const res = await callApi({ action: 'GET_CLASSES', sessionToken });
@@ -207,6 +312,8 @@ async function deleteClass(classId) {
   }
 }
 
+// --- ROSTER & ENROLLMENTS ---
+
 async function loadSubjectEnrollment() {
   if (!activeClassId) return;
   const c = classList.find(x => x.classId === activeClassId);
@@ -254,7 +361,7 @@ function renderAvailableList() {
   tbody.innerHTML = '';
 
   if (allStudentsList.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="4" class="text-center py-4 text-body-secondary">All roster examinees assigned.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" class="text-center py-4 text-body-secondary">No unassigned students found. Students will appear here once they self-register.</td></tr>';
     return;
   }
 
@@ -290,7 +397,7 @@ async function assignSelectedStudents() {
 async function autoAssignBySection() {
   const c = classList.find(x => x.classId === activeClassId);
   if (!c || !c.defaultSection) return alert("No Default Section configured.");
-  if (!confirm(`Auto-assign all examinees in section "${c.defaultSection}"?`)) return;
+  if (!confirm(`Auto-assign all registered students in section "${c.defaultSection}"?`)) return;
 
   const res = await callApi({ action: 'AUTO_ASSIGN_SECTION', sessionToken, classId: activeClassId, section: c.defaultSection });
   if (res.success) {
@@ -309,6 +416,8 @@ async function unassignStudent(studentId) {
   }
 }
 
+// --- EXAM KEY BUILDER ---
+
 async function loadExamBuilderSilent() {
   if (!activeClassId) return;
   const res = await callApi({ action: 'GET_FULL_EXAM_CONFIG', sessionToken, classId: activeClassId });
@@ -319,12 +428,12 @@ async function loadExamBuilderSilent() {
 
 async function loadExamBuilder() {
   if (!activeClassId) return;
+  await loadExamBuilderSilent();
   const c = classList.find(x => x.classId === activeClassId);
   if (c) {
     document.getElementById('builder-class-heading').innerText = `${c.subjectCode}: Answer Key`;
     document.getElementById('builder-class-subheading').innerText = `Configuring ${builderItems.length} Examination Items`;
   }
-  await loadExamBuilderSilent();
   renderBuilderItems();
 }
 
@@ -438,9 +547,15 @@ async function saveExamBuilder() {
 
   btn.disabled = false;
   btn.innerHTML = `<i class="bi bi-check2-circle me-1"></i> Save Keys`;
-  if (res.success) alert("Exam blueprint and keys successfully saved!");
-  else alert("Error saving blueprint: " + res.message);
+  if (res.success) {
+    alert("Exam blueprint and keys successfully saved!");
+    await loadClasses();
+  } else {
+    alert("Error saving blueprint: " + res.message);
+  }
 }
+
+// --- SUBMISSIONS LEDGER ---
 
 async function loadSubmissionsLedger() {
   if (!activeClassId) return;

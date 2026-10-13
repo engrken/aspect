@@ -1,15 +1,41 @@
 import os
+import hashlib
+import hmac
+import secrets
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, JSON, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, JSON, DateTime, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-raw_db_url = os.getenv("DATABASE_URL", "sqlite:///./aspect_local.db")
-if raw_db_url.startswith("postgres://"):
+raw_db_url = os.getenv("DATABASE_URL", "").strip()
+if not raw_db_url:
+    raw_db_url = "sqlite:////tmp/aspect_local.db"
+elif raw_db_url.startswith("postgres://"):
     raw_db_url = raw_db_url.replace("postgres://", "postgresql://", 1)
 
-engine = create_engine(raw_db_url, pool_pre_ping=True)
+connect_args = {"check_same_thread": False} if raw_db_url.startswith("sqlite") else {}
+engine = create_engine(raw_db_url, connect_args=connect_args, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+# --- PASSWORD HASHING & SALTING UTILITIES (PBKDF2-HMAC-SHA256) ---
+
+def hash_password(password: str, iterations: int = 260000) -> str:
+    salt = secrets.token_hex(16)
+    dk = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), iterations)
+    return f"pbkdf2_sha256${iterations}${salt}${dk.hex()}"
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    if not stored_hash or "$" not in stored_hash:
+        return False
+    try:
+        algo, iter_str, salt, hash_hex = stored_hash.split("$")
+        iterations = int(iter_str)
+        dk = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), iterations)
+        return hmac.compare_digest(dk.hex(), hash_hex)
+    except Exception:
+        return False
+
+# --- DATABASE MODELS ---
 
 class RosterUser(Base):
     __tablename__ = "roster"
@@ -17,7 +43,8 @@ class RosterUser(Base):
     email = Column(String, default="")
     full_name = Column(String, nullable=False)
     section = Column(String, default="BS-ECE")
-    role = Column(String, default="STUDENT")
+    role = Column(String, default="STUDENT")  # TEACHER or STUDENT
+    password_hash = Column(String, default="")
 
 class AuthSession(Base):
     __tablename__ = "auth_sessions"
@@ -67,70 +94,44 @@ class Submission(Base):
     is_passed = Column(Boolean)
     answers = Column(JSON)
 
-Base.metadata.create_all(bind=engine)
+def ensure_seeded(db):
+    """Creates tables, removes any dummy students, and ensures only FACULTY-01 is seeded."""
+    Base.metadata.create_all(bind=engine)
 
-def seed_initial_data():
-    db = SessionLocal()
     try:
-        if not db.query(RosterUser).filter_by(student_id="FACULTY-01").first():
-            db.add(RosterUser(
-                student_id="FACULTY-01",
-                email="faculty@filamer.edu.ph",
-                full_name="Lead Faculty In-Charge",
-                section="College of Engineering",
-                role="TEACHER"
-            ))
-            for i in range(1, 31):
-                yr = "1A" if i <= 10 else ("2A" if i <= 20 else "3A")
-                s_id = f"2026-{str(i).zfill(4)}"
-                db.add(RosterUser(
-                    student_id=s_id,
-                    email="",
-                    full_name=f"Examinee Student {i}",
-                    section=f"BS-ECE {yr}",
-                    role="STUDENT"
-                ))
-                if i > 20:
-                    db.add(Enrollment(class_id="CLS-001", student_id=s_id))
-
-            db.add(CourseClass(
-                class_id="CLS-001",
-                subject_code="ECE 312",
-                subject_title="Feedback and Control Systems",
-                default_section="BS-ECE 3A",
-                passing_percentage=70,
-                owner_teacher_id="FACULTY-01"
-            ))
-            db.add(CourseClass(
-                class_id="CLS-002",
-                subject_code="ECE 321",
-                subject_title="Digital Communications",
-                default_section="BS-ECE 3B",
-                passing_percentage=70,
-                owner_teacher_id="FACULTY-01"
-            ))
-            keys_a = ['A','B','C','D','A','B','C','D','A','B','T','F','T','F','T']
-            keys_b = ['C','D','A','B','C','D','A','B','C','D','F','T','F','T','F']
-            for idx in range(15):
-                db.add(ExamItem(
-                    class_id="CLS-001",
-                    item_no=idx + 1,
-                    type="MCQ" if idx < 10 else "TF",
-                    points=1,
-                    set_a=keys_a[idx],
-                    set_b=keys_b[idx]
-                ))
-            db.commit()
+        db.execute(text("ALTER TABLE roster ADD COLUMN IF NOT EXISTS password_hash VARCHAR DEFAULT ''"))
+        db.commit()
     except Exception:
         db.rollback()
-    finally:
-        db.close()
 
-seed_initial_data()
+    # Purge any previously seeded dummy students ("Examinee Student %")
+    dummy_students = db.query(RosterUser).filter(RosterUser.full_name.like("Examinee Student %")).all()
+    if dummy_students:
+        for ds in dummy_students:
+            db.query(Enrollment).filter_by(student_id=ds.student_id).delete()
+            db.delete(ds)
+        db.commit()
+
+    # Ensure primary System Admin / Faculty account exists
+    faculty = db.query(RosterUser).filter_by(student_id="FACULTY-01").first()
+    if not faculty:
+        db.add(RosterUser(
+            student_id="FACULTY-01",
+            email="faculty@filamer.edu.ph",
+            full_name="System Administrator",
+            section="College of Engineering",
+            role="TEACHER",
+            password_hash=hash_password("admin123")
+        ))
+        db.commit()
+    elif not faculty.password_hash:
+        faculty.password_hash = hash_password("admin123")
+        db.commit()
 
 def get_db():
     db = SessionLocal()
     try:
+        ensure_seeded(db)
         yield db
     finally:
         db.close()
