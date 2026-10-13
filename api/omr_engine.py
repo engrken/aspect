@@ -3,12 +3,15 @@ import cv2
 import numpy as np
 
 def decode_qr_opencv(gray_img):
-    """Attempts to decode the student QR code from the top-right meta box."""
+    """Attempts to decode the student QR code from the top-right meta box with super-resolution upscaling."""
     try:
         detector = cv2.QRCodeDetector()
         h, w = gray_img.shape
-        qr_crop = gray_img[int(h * 0.05):int(h * 0.36), int(w * 0.55):w]
-        for candidate in [qr_crop, gray_img]:
+        qr_crop = gray_img[int(h * 0.04):int(h * 0.30), int(w * 0.65):w]
+        upscaled = cv2.resize(qr_crop, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
+        _, thresh_qr = cv2.threshold(upscaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        for candidate in [qr_crop, upscaled, thresh_qr, gray_img]:
             data, _, _ = detector.detectAndDecode(candidate)
             if data:
                 cleaned = data.strip()
@@ -23,19 +26,21 @@ def decode_qr_opencv(gray_img):
 def auto_warp_sheet_opencv(gray_img, is_form_100=False):
     """
     If the image is already warped to canonical size (400x450 or 400x570), returns it directly.
-    Otherwise locates the 4 corner fiducial squares and perspective-warps the sheet.
+    Otherwise locates the 4 outer corner fiducial squares and maps their centers to
+    (12, 12), (388, 12), (388, H-12), (12, H-12) to match the SVG viewBox 1-to-1.
     """
     H, W = gray_img.shape
     canon_w = 400
     canon_h = 570 if is_form_100 else 450
 
-    if W == canon_w and H == canon_h:
+    if W == canon_w and H in (450, 462, 570, 580):
+        if H != canon_h:
+            gray_img = cv2.resize(gray_img, (canon_w, canon_h))
         return gray_img, None
 
     min_lum = float(np.percentile(gray_img, 2))
     max_lum = float(np.percentile(gray_img, 98))
     best_quad = None
-    best_score = -1.0
 
     for factor in (0.28, 0.35, 0.42):
         thresh_val = int(min_lum + (max_lum - min_lum) * factor)
@@ -50,62 +55,32 @@ def auto_warp_sheet_opencv(gray_img, is_form_100=False):
             x, y, bw, bh, area = stats[i]
             if min_s <= bw <= max_s and min_s <= bh <= max_s:
                 aspect = bw / float(bh)
-                if 0.65 <= aspect <= 1.50:
+                if 0.68 <= aspect <= 1.45:
                     solidity = area / float(bw * bh)
                     if solidity >= 0.65:
                         cx, cy = centroids[i]
-                        candidates.append({
-                            'x': float(cx),
-                            'y': float(cy),
-                            'size': (bw + bh) * 0.5
-                        })
+                        candidates.append({'x': float(cx), 'y': float(cy)})
 
-        if len(candidates) < 4:
-            continue
+        tl_list = [c for c in candidates if c['x'] < W * 0.38 and c['y'] < H * 0.38]
+        tr_list = [c for c in candidates if c['x'] > W * 0.62 and c['y'] < H * 0.38]
+        bl_list = [c for c in candidates if c['x'] < W * 0.38 and c['y'] > H * 0.62]
+        br_list = [c for c in candidates if c['x'] > W * 0.62 and c['y'] > H * 0.62]
 
-        horiz_pairs = []
-        for i in range(len(candidates)):
-            for j in range(len(candidates)):
-                if i == j:
-                    continue
-                left, right = candidates[i], candidates[j]
-                dx = right['x'] - left['x']
-                dy = abs(right['y'] - left['y'])
-                if dx < W * 0.28 or dy > dx * 0.22:
-                    continue
-                if max(left['size'], right['size']) > min(left['size'], right['size']) * 1.65:
-                    continue
-                horiz_pairs.append((left, right, float(np.hypot(dx, dy))))
+        if tl_list and tr_list and bl_list and br_list:
+            tl = min(tl_list, key=lambda c: c['x'] + c['y'])
+            tr = max(tr_list, key=lambda c: c['x'] - c['y'])
+            bl = min(bl_list, key=lambda c: c['x'] - c['y'])
+            br = max(br_list, key=lambda c: c['x'] + c['y'])
 
-        for i in range(len(horiz_pairs)):
-            tl, tr, top_w = horiz_pairs[i]
-            for j in range(len(horiz_pairs)):
-                if i == j:
-                    continue
-                bl, br, bot_w = horiz_pairs[j]
-                lh = bl['y'] - tl['y']
-                rh = br['y'] - tr['y']
-                if lh < W * 0.25 or rh < W * 0.25:
-                    continue
-                if abs(bl['x'] - tl['x']) > lh * 0.22 or abs(br['x'] - tr['x']) > rh * 0.22:
-                    continue
-                w_diff = abs(top_w - bot_w) / max(top_w, bot_w)
-                h_diff = abs(lh - rh) / max(lh, rh)
-                if w_diff > 0.22 or h_diff > 0.22:
-                    continue
-                avg_w = (top_w + bot_w) * 0.5
-                avg_h = (lh + rh) * 0.5
-                ratio = avg_h / avg_w
-                if not (0.75 <= ratio <= 1.65):
-                    continue
+            top_w = float(np.hypot(tr['x'] - tl['x'], tr['y'] - tl['y']))
+            bot_w = float(np.hypot(br['x'] - bl['x'], br['y'] - bl['y']))
+            left_h = float(np.hypot(bl['x'] - tl['x'], bl['y'] - tl['y']))
+            right_h = float(np.hypot(br['x'] - tr['x'], br['y'] - tr['y']))
 
-                score = (avg_w * avg_h) * (1.0 - w_diff) * (1.0 - h_diff)
-                if score > best_score:
-                    best_score = score
+            if top_w > W * 0.45 and bot_w > W * 0.45 and left_h > W * 0.40 and right_h > W * 0.40:
+                if abs(top_w - bot_w) / max(top_w, bot_w) <= 0.20 and abs(left_h - right_h) / max(left_h, right_h) <= 0.20:
                     best_quad = (tl, tr, br, bl)
-
-        if best_quad is not None:
-            break
+                    break
 
     if best_quad is not None:
         tl, tr, br, bl = best_quad
@@ -116,10 +91,10 @@ def auto_warp_sheet_opencv(gray_img, is_form_100=False):
             [bl['x'], bl['y']]
         ], dtype=np.float32)
         dst_pts = np.array([
-            [0, 0],
-            [canon_w, 0],
-            [canon_w, canon_h],
-            [0, canon_h]
+            [12.0, 12.0],
+            [canon_w - 12.0, 12.0],
+            [canon_w - 12.0, canon_h - 12.0],
+            [12.0, canon_h - 12.0]
         ], dtype=np.float32)
         M = cv2.getPerspectiveTransform(src_pts, dst_pts)
         warped = cv2.warpPerspective(gray_img, M, (canon_w, canon_h), borderValue=255)
@@ -130,6 +105,21 @@ def auto_warp_sheet_opencv(gray_img, is_form_100=False):
     resized = cv2.resize(gray_img, (canon_w, canon_h))
     _, buf = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
     return resized, base64.b64encode(buf).decode('utf-8')
+
+def detect_shaded_test_set(blurred_img, default_set='A'):
+    """Checks the Set A (92, 103) and Set B (148, 103) bubbles in the SVG meta box."""
+    try:
+        roi_a = blurred_img[98:109, 87:98]
+        roi_b = blurred_img[98:109, 143:154]
+        lum_a = float(np.percentile(roi_a, 35)) if roi_a.size > 0 else 255.0
+        lum_b = float(np.percentile(roi_b, 35)) if roi_b.size > 0 else 255.0
+        if lum_b + 20.0 < lum_a and lum_b < 135.0:
+            return 'B'
+        if lum_a + 20.0 < lum_b and lum_a < 135.0:
+            return 'A'
+    except Exception:
+        pass
+    return str(default_set or 'A').upper()
 
 def grade_sheet_opencv(image_bytes, items, test_set):
     np_arr = np.frombuffer(image_bytes, np.uint8)
@@ -148,33 +138,35 @@ def grade_sheet_opencv(image_bytes, items, test_set):
 
     H, W = img.shape
     blurred = cv2.GaussianBlur(img, (3, 3), 0)
-    target_key = 'setB' if str(test_set).upper() == 'B' else 'setA'
+
+    active_set = detect_shaded_test_set(blurred, default_set=test_set)
+    target_key = 'setB' if active_set == 'B' else 'setA'
 
     item_coords = {}
     if is_form_100:
-        # Exact coordinates for .omr-box-100 (680x640 -> 400x570)
+        # Exact SVG viewBox="0 0 400 570" coordinates (works for 51..100 items on any paper size)
         col_xs = [
-            [35.47, 47.09, 58.72, 70.34],
-            [132.11, 143.73, 155.35, 166.97],
-            [228.75, 240.37, 251.99, 263.61],
-            [325.38, 337.00, 348.62, 360.24]
+            [46.0, 58.0, 70.0, 82.0],
+            [138.0, 150.0, 162.0, 174.0],
+            [230.0, 242.0, 254.0, 266.0],
+            [322.0, 334.0, 346.0, 358.0]
         ]
-        row_start_y = 128.11
-        row_pitch = 16.710
+        row_start_y = 136.0
+        row_pitch = 16.5
         for c in range(4):
             for r in range(25):
                 item_coords[c * 25 + r + 1] = (col_xs[c], int(round(row_start_y + r * row_pitch)))
-        box_r = 4
+        box_r = 5
     else:
-        # Exact coordinates for .omr-box-50 (464x492 -> 400x450)
+        # Exact SVG viewBox="0 0 400 450" coordinates (works for 1..50 items on any paper size)
         col_xs = [
-            [47.49, 64.84, 82.19, 99.54],
-            [177.17, 194.52, 211.87, 229.22],
-            [306.85, 324.20, 341.55, 358.90]
+            [56.0, 72.0, 88.0, 104.0],
+            [180.0, 196.0, 212.0, 228.0],
+            [304.0, 320.0, 336.0, 352.0]
         ]
-        top_row1_y = 133.26
-        bot_row9_y = 287.77
-        row_pitch = 17.382
+        top_row1_y = 136.0
+        bot_row9_y = 284.0
+        row_pitch = 16.0
 
         cols_def = [
             (0, 1, 8, 9, 17),
@@ -188,7 +180,7 @@ def grade_sheet_opencv(image_bytes, items, test_set):
             for i in range(bs, be + 1):
                 b = i - bs
                 item_coords[i] = (col_xs[col_idx], int(round(bot_row9_y + b * row_pitch)))
-        box_r = 4
+        box_r = 5
 
     detected_answers = {}
     item_breakdown = []
@@ -214,12 +206,31 @@ def grade_sheet_opencv(image_bytes, items, test_set):
             y0, y1 = max(0, cy - box_r), min(H, cy + box_r + 1)
             x0, x1 = max(0, cx - box_r), min(W, cx + box_r + 1)
             roi = blurred[y0:y1, x0:x1]
-            mean_lum = float(np.mean(roi)) if roi.size > 0 else 255.0
+
+            if roi.size > 0:
+                flat = np.sort(roi.flatten())
+                k = max(1, int(len(flat) * 0.40))
+                dark_core_lum = float(np.mean(flat[:k]))
+
+                weights = np.clip(200.0 - roi.astype(np.float32), 0.0, None)
+                w_sum = float(np.sum(weights))
+                if w_sum > 100.0:
+                    yy, xx = np.mgrid[y0:y1, x0:x1]
+                    snap_x = float(np.sum(xx * weights) / w_sum)
+                    snap_y = float(np.sum(yy * weights) / w_sum)
+                else:
+                    snap_x, snap_y = float(cx_f), float(cy)
+            else:
+                dark_core_lum = 255.0
+                snap_x, snap_y = float(cx_f), float(cy)
+
             bubble_stats.append({
                 'opt': options[i],
-                'lum': mean_lum,
-                'x': round(float(cx_f), 1),
-                'y': round(float(cy), 1)
+                'lum': dark_core_lum,
+                'x': round(snap_x, 1),
+                'y': round(snap_y, 1),
+                'grid_x': round(float(cx_f), 1),
+                'grid_y': round(float(cy), 1)
             })
 
         sorted_b = sorted(bubble_stats, key=lambda b: b['lum'])
@@ -233,8 +244,8 @@ def grade_sheet_opencv(image_bytes, items, test_set):
         student_ans = None
         is_double_shaded = False
 
-        if drop_from_lightest >= 20.0 and darkest['lum'] < 130.0:
-            if separation < 10.0 and (lightest['lum'] - second_darkest['lum']) >= 20.0:
+        if drop_from_lightest >= 22.0 and darkest['lum'] < 135.0:
+            if separation < 10.0 and (lightest['lum'] - second_darkest['lum']) >= 22.0:
                 student_ans = f"{darkest['opt']},{second_darkest['opt']}"
                 is_double_shaded = True
             else:
@@ -279,9 +290,9 @@ def grade_sheet_opencv(image_bytes, items, test_set):
 
             if state != 'none':
                 bubbles_overlay.append({
-                    'x': b['x'],
-                    'y': b['y'],
-                    'r': 6.0 if not is_form_100 else 4.5,
+                    'x': b['x'] if was_marked else b['grid_x'],
+                    'y': b['y'] if was_marked else b['grid_y'],
+                    'r': 6.0 if not is_form_100 else 5.2,
                     'state': state
                 })
 
