@@ -1,0 +1,488 @@
+/**
+ * API Controller via Vercel Serverless Edge
+ */
+const API_BASE_URL = window.ASPECT_CONFIG?.API_URL || '/api';
+
+let sessionToken = localStorage.getItem('aspect_token') || '';
+let classList = [];
+let activeClassId = localStorage.getItem('aspect_active_class') || '';
+let builderItems = [];
+var enrolledStudentsList = [];
+let allStudentsList = [];
+let activeBuilderSet = 'A';
+
+async function callApi(payload) {
+  try {
+    const res = await fetch(API_BASE_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    return await res.json();
+  } catch (err) {
+    console.error("API Call Error:", err);
+    return { success: false, message: err.toString() };
+  }
+}
+
+window.addEventListener('DOMContentLoaded', async () => {
+  initTheme();
+  if (!sessionToken) {
+    window.location.href = 'index.html';
+    return;
+  }
+
+  const auth = await callApi({ action: 'VALIDATE_SESSION', sessionToken });
+  if (!auth.valid || auth.user.role !== 'TEACHER') {
+    localStorage.removeItem('aspect_token');
+    window.location.href = 'index.html';
+    return;
+  }
+
+  document.getElementById('nav-name').innerText = auth.user.fullName;
+  document.getElementById('nav-id').innerText = `Faculty ID: ${auth.user.studentId}`;
+  document.getElementById('nav-avatar').innerText = auth.user.fullName.charAt(0);
+  document.getElementById('main-dashboard').style.display = 'block';
+
+  await loadClasses();
+});
+
+function logoutTeacher() {
+  localStorage.removeItem('aspect_token');
+  localStorage.removeItem('aspect_active_class');
+  window.location.href = 'index.html';
+}
+
+function initTheme() {
+  const theme = localStorage.getItem('aspect_theme') || 'light';
+  document.documentElement.setAttribute('data-bs-theme', theme);
+  updateThemeIcon(theme);
+}
+
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-bs-theme') || 'light';
+  const next = cur === 'light' ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-bs-theme', next);
+  localStorage.setItem('aspect_theme', next);
+  updateThemeIcon(next);
+}
+
+function updateThemeIcon(theme) {
+  const icon = document.getElementById('theme-icon');
+  if (!icon) return;
+  icon.className = theme === 'dark' ? 'bi bi-sun-fill text-warning' : 'bi bi-moon-stars-fill';
+}
+
+async function loadClasses() {
+  const res = await callApi({ action: 'GET_CLASSES', sessionToken });
+  const select = document.getElementById('global-class-select');
+  const tbody = document.getElementById('classes-table-body');
+
+  if (!res.success) {
+    alert("Session expired: " + res.message);
+    logoutTeacher();
+    return;
+  }
+
+  classList = res.classes || [];
+  select.innerHTML = '';
+  tbody.innerHTML = '';
+
+  if (classList.length === 0) {
+    select.innerHTML = '<option value="">No Subjects</option>';
+    tbody.innerHTML = '<tr><td colspan="6" class="text-center py-4 text-body-secondary">No subjects found. Click "Add New Subject" to begin.</td></tr>';
+    return;
+  }
+
+  if (!activeClassId || !classList.some(c => c.classId === activeClassId)) {
+    activeClassId = classList[0].classId;
+    localStorage.setItem('aspect_active_class', activeClassId);
+  }
+
+  classList.forEach(c => {
+    const opt = document.createElement('option');
+    opt.value = c.classId;
+    opt.innerText = `${c.subjectCode} (${c.defaultSection || 'General'})`;
+    if (c.classId === activeClassId) opt.selected = true;
+    select.appendChild(opt);
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="font-monospace fw-bold">${c.subjectCode}</td>
+      <td>${c.subjectTitle}</td>
+      <td>${c.defaultSection || '—'}</td>
+      <td><span class="badge bg-secondary-subtle text-secondary-emphasis">${c.passingPercentage || 70}%</span></td>
+      <td><span class="badge bg-primary-subtle text-primary-emphasis">${c.totalItems || 50} Items</span></td>
+      <td class="text-center">
+        <button class="btn btn-sm btn-outline-primary me-1" onclick="selectClassAndGo('${c.classId}', '#tab-scanner')"><i class="bi bi-camera"></i> Scan</button>
+        <button class="btn btn-sm btn-outline-secondary me-1" onclick="openEditClassModal('${c.classId}')"><i class="bi bi-pencil"></i></button>
+        <button class="btn btn-sm btn-outline-danger" onclick="deleteClass('${c.classId}')"><i class="bi bi-trash"></i></button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  await onActiveClassChange(activeClassId);
+}
+
+async function onActiveClassChange(classId) {
+  activeClassId = classId;
+  localStorage.setItem('aspect_active_class', classId);
+  document.getElementById('global-class-select').value = classId;
+
+  await Promise.all([
+    loadSubjectEnrollment(),
+    loadExamBuilderSilent()
+  ]);
+
+  if (typeof populateStudentSelect === 'function') {
+    populateStudentSelect();
+  }
+}
+
+function selectClassAndGo(classId, tabTarget) {
+  onActiveClassChange(classId);
+  const btn = document.querySelector(`[data-bs-target="${tabTarget}"]`);
+  if (btn) btn.click();
+}
+
+function generateBatchPersonalizedPDF() {
+  if (!activeClassId) return alert("Select a subject first.");
+  window.open(`print_sheets.html?classId=${encodeURIComponent(activeClassId)}`, '_blank');
+}
+
+function openClassModal() {
+  document.getElementById('modal-class-id').value = '';
+  document.getElementById('modal-sub-code').value = '';
+  document.getElementById('modal-sub-title').value = '';
+  document.getElementById('modal-sub-section').value = '';
+  document.getElementById('modal-sub-pass').value = '70';
+  document.getElementById('modal-class-title').innerText = 'Create New Subject';
+  new bootstrap.Modal(document.getElementById('class-modal')).show();
+}
+
+function openEditClassModal(classId) {
+  const c = classList.find(x => x.classId === classId);
+  if (!c) return;
+  document.getElementById('modal-class-id').value = c.classId;
+  document.getElementById('modal-sub-code').value = c.subjectCode;
+  document.getElementById('modal-sub-title').value = c.subjectTitle;
+  document.getElementById('modal-sub-section').value = c.defaultSection || '';
+  document.getElementById('modal-sub-pass').value = c.passingPercentage || 70;
+  document.getElementById('modal-class-title').innerText = 'Edit Subject Blueprint';
+  new bootstrap.Modal(document.getElementById('class-modal')).show();
+}
+
+async function handleSaveClass(e) {
+  e.preventDefault();
+  const classId = document.getElementById('modal-class-id').value;
+  const payload = {
+    action: 'SAVE_CLASS',
+    sessionToken,
+    classData: {
+      classId,
+      subjectCode: document.getElementById('modal-sub-code').value.trim(),
+      subjectTitle: document.getElementById('modal-sub-title').value.trim(),
+      defaultSection: document.getElementById('modal-sub-section').value.trim(),
+      passingPercentage: Number(document.getElementById('modal-sub-pass').value) || 70
+    }
+  };
+
+  const res = await callApi(payload);
+  if (res.success) {
+    bootstrap.Modal.getInstance(document.getElementById('class-modal')).hide();
+    await loadClasses();
+  } else {
+    alert("Error saving subject: " + res.message);
+  }
+}
+
+async function deleteClass(classId) {
+  if (!confirm("Are you sure you want to remove this subject? Associated keys will be deleted.")) return;
+  const res = await callApi({ action: 'DELETE_CLASS', sessionToken, classId });
+  if (res.success) {
+    await loadClasses();
+  } else {
+    alert("Error deleting subject: " + res.message);
+  }
+}
+
+async function loadSubjectEnrollment() {
+  if (!activeClassId) return;
+  const c = classList.find(x => x.classId === activeClassId);
+  if (c) {
+    document.getElementById('enroll-subject-heading').innerText = `${c.subjectCode} — ${c.subjectTitle}`;
+    document.getElementById('enroll-subject-subheading').innerText = `Section: ${c.defaultSection || 'None'}`;
+  }
+
+  const res = await callApi({ action: 'GET_CLASS_ENROLLMENTS', sessionToken, classId: activeClassId });
+  if (!res.success) return;
+
+  enrolledStudentsList = res.enrolledStudents || [];
+  allStudentsList = res.availableStudents || [];
+
+  const enrolledBadge = document.getElementById('enrolled-count-badge');
+  if (enrolledBadge) enrolledBadge.innerText = `${enrolledStudentsList.length} Enrolled`;
+
+  const enrolledTbody = document.getElementById('enrolled-students-body');
+  if (enrolledTbody) {
+    enrolledTbody.innerHTML = '';
+    if (enrolledStudentsList.length === 0) {
+      enrolledTbody.innerHTML = '<tr><td colspan="4" class="text-center py-4 text-body-secondary">No examinees assigned yet.</td></tr>';
+    } else {
+      enrolledStudentsList.forEach(s => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td class="font-monospace">${s.studentId}</td>
+          <td class="fw-bold">${s.fullName}</td>
+          <td>${s.section || '—'}</td>
+          <td class="text-center">
+            <button class="btn btn-sm btn-outline-danger" onclick="unassignStudent('${s.studentId}')"><i class="bi bi-x-lg"></i></button>
+          </td>
+        `;
+        enrolledTbody.appendChild(tr);
+      });
+    }
+  }
+
+  renderAvailableList();
+}
+
+function renderAvailableList() {
+  const tbody = document.getElementById('available-students-body');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+
+  if (allStudentsList.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="4" class="text-center py-4 text-body-secondary">All roster examinees assigned.</td></tr>';
+    return;
+  }
+
+  allStudentsList.forEach(s => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><input type="checkbox" class="form-check-input available-chk" value="${s.studentId}"></td>
+      <td class="font-monospace">${s.studentId}</td>
+      <td class="fw-bold">${s.fullName}</td>
+      <td>${s.section || '—'}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function toggleSelectAllAvailable(checked) {
+  document.querySelectorAll('.available-chk').forEach(c => c.checked = checked);
+}
+
+async function assignSelectedStudents() {
+  const chks = document.querySelectorAll('.available-chk:checked');
+  const studentIds = Array.from(chks).map(c => c.value);
+  if (studentIds.length === 0) return alert("Select at least one student.");
+
+  const res = await callApi({ action: 'ASSIGN_STUDENTS', sessionToken, classId: activeClassId, studentIds });
+  if (res.success) {
+    await loadSubjectEnrollment();
+  } else {
+    alert("Error assigning: " + res.message);
+  }
+}
+
+async function autoAssignBySection() {
+  const c = classList.find(x => x.classId === activeClassId);
+  if (!c || !c.defaultSection) return alert("No Default Section configured.");
+  if (!confirm(`Auto-assign all examinees in section "${c.defaultSection}"?`)) return;
+
+  const res = await callApi({ action: 'AUTO_ASSIGN_SECTION', sessionToken, classId: activeClassId, section: c.defaultSection });
+  if (res.success) {
+    await loadSubjectEnrollment();
+  } else {
+    alert("Error auto-assigning: " + res.message);
+  }
+}
+
+async function unassignStudent(studentId) {
+  const res = await callApi({ action: 'UNASSIGN_STUDENT', sessionToken, classId: activeClassId, studentId });
+  if (res.success) {
+    await loadSubjectEnrollment();
+  } else {
+    alert("Error unassigning: " + res.message);
+  }
+}
+
+async function loadExamBuilderSilent() {
+  if (!activeClassId) return;
+  const res = await callApi({ action: 'GET_FULL_EXAM_CONFIG', sessionToken, classId: activeClassId });
+  if (res.success && res.items) {
+    builderItems = res.items;
+  }
+}
+
+async function loadExamBuilder() {
+  if (!activeClassId) return;
+  const c = classList.find(x => x.classId === activeClassId);
+  if (c) {
+    document.getElementById('builder-class-heading').innerText = `${c.subjectCode}: Answer Key`;
+    document.getElementById('builder-class-subheading').innerText = `Configuring ${builderItems.length} Examination Items`;
+  }
+  await loadExamBuilderSilent();
+  renderBuilderItems();
+}
+
+function switchBuilderSet(setLetter) {
+  activeBuilderSet = setLetter;
+  renderBuilderItems();
+}
+
+function renderBuilderItems() {
+  const tbody = document.getElementById('builder-items-body');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+
+  if (builderItems.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" class="text-center py-4 text-body-secondary">No items configured. Click "+ Add" or "Batch".</td></tr>';
+    return;
+  }
+
+  const targetKey = activeBuilderSet === 'B' ? 'setB' : 'setA';
+
+  builderItems.forEach((it, idx) => {
+    it.itemNo = idx + 1;
+    const curVal = (it[targetKey] || '').toUpperCase();
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="fw-bold font-monospace text-center">#${it.itemNo}</td>
+      <td>
+        <select class="form-select form-select-sm" onchange="updateItemType(${idx}, this.value)">
+          <option value="MCQ" ${it.type !== 'TF' ? 'selected' : ''}>Multiple Choice (A-D)</option>
+          <option value="TF" ${it.type === 'TF' ? 'selected' : ''}>True / False (T/F)</option>
+        </select>
+      </td>
+      <td>
+        <input type="number" class="form-control form-control-sm font-monospace text-center" value="${it.points || 1}" min="1" max="10" onchange="updateItemPoints(${idx}, this.value)">
+      </td>
+      <td>
+        <div class="d-flex gap-1.5 align-items-center">
+          ${it.type === 'TF' ? renderTfBubbles(idx, curVal, targetKey) : renderMcqBubbles(idx, curVal, targetKey)}
+        </div>
+      </td>
+      <td class="text-center">
+        <button class="btn btn-sm btn-outline-danger" onclick="removeItem(${idx})"><i class="bi bi-trash"></i></button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function renderMcqBubbles(idx, curVal, targetKey) {
+  return ['A', 'B', 'C', 'D'].map(opt => `
+    <button type="button" class="bubble-btn ${curVal === opt ? 'active' : ''}" onclick="selectKeyOption(${idx}, '${opt}', '${targetKey}')">${opt}</button>
+  `).join('');
+}
+
+function renderTfBubbles(idx, curVal, targetKey) {
+  return ['T', 'F'].map(opt => `
+    <button type="button" class="bubble-btn ${curVal === opt ? 'active' : ''}" onclick="selectKeyOption(${idx}, '${opt}', '${targetKey}')">${opt}</button>
+  `).join('');
+}
+
+function selectKeyOption(idx, val, targetKey) {
+  builderItems[idx][targetKey] = val;
+  renderBuilderItems();
+}
+
+function updateItemType(idx, newType) {
+  builderItems[idx].type = newType;
+  builderItems[idx].setA = '';
+  builderItems[idx].setB = '';
+  renderBuilderItems();
+}
+
+function updateItemPoints(idx, pts) {
+  builderItems[idx].points = Number(pts) || 1;
+}
+
+function addNewItem() {
+  builderItems.push({ itemNo: builderItems.length + 1, type: 'MCQ', points: 1, setA: 'A', setB: 'A' });
+  renderBuilderItems();
+}
+
+function removeItem(idx) {
+  builderItems.splice(idx, 1);
+  renderBuilderItems();
+}
+
+function applyBatchGenerator() {
+  const mcq = parseInt(document.getElementById('batch-mcq-count').value) || 0;
+  const tf = parseInt(document.getElementById('batch-tf-count').value) || 0;
+
+  builderItems = [];
+  for (let i = 1; i <= mcq; i++) builderItems.push({ itemNo: i, type: 'MCQ', points: 1, setA: 'A', setB: 'A' });
+  for (let i = 1; i <= tf; i++) builderItems.push({ itemNo: mcq + i, type: 'TF', points: 1, setA: 'T', setB: 'T' });
+
+  bootstrap.Modal.getInstance(document.getElementById('batch-modal')).hide();
+  renderBuilderItems();
+}
+
+async function saveExamBuilder() {
+  const btn = document.getElementById('btn-save-builder');
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span> Saving...`;
+
+  const res = await callApi({
+    action: 'SAVE_EXAM_CONFIG',
+    sessionToken,
+    classId: activeClassId,
+    items: builderItems
+  });
+
+  btn.disabled = false;
+  btn.innerHTML = `<i class="bi bi-check2-circle me-1"></i> Save Keys`;
+  if (res.success) alert("Exam blueprint and keys successfully saved!");
+  else alert("Error saving blueprint: " + res.message);
+}
+
+async function loadSubmissionsLedger() {
+  if (!activeClassId) return;
+  const tbody = document.getElementById('submissions-table-body');
+  tbody.innerHTML = '<tr><td colspan="7" class="text-center py-4 text-body-secondary">Loading records...</td></tr>';
+
+  const res = await callApi({ action: 'GET_SUBMISSIONS', sessionToken, classId: activeClassId });
+  tbody.innerHTML = '';
+
+  if (!res.success || !res.submissions || res.submissions.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" class="text-center py-4 text-body-secondary">No scanned exam records found.</td></tr>';
+    document.getElementById('kpi-total').innerText = '0';
+    document.getElementById('kpi-mean').innerText = '0.00';
+    document.getElementById('kpi-pass-rate').innerText = '0%';
+    document.getElementById('kpi-range').innerText = '0 - 0';
+    return;
+  }
+
+  const subs = res.submissions;
+  let totalScore = 0, passedCount = 0, minScore = 9999, maxScore = -1;
+
+  subs.forEach(s => {
+    totalScore += s.rawScore;
+    if (s.isPassed) passedCount++;
+    if (s.rawScore < minScore) minScore = s.rawScore;
+    if (s.rawScore > maxScore) maxScore = s.rawScore;
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="fw-bold">${s.fullName}</td>
+      <td class="font-monospace">${s.studentId}</td>
+      <td><span class="badge bg-secondary">${s.testSet || 'A'}</span></td>
+      <td class="fw-bold font-monospace">${s.rawScore} / ${s.totalPoints}</td>
+      <td class="fw-bold">${s.percentage}</td>
+      <td><span class="badge ${s.isPassed ? 'bg-success' : 'bg-danger'}">${s.isPassed ? 'PASSED' : 'FAILED'}</span></td>
+      <td class="small text-body-secondary">${s.timestamp}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  document.getElementById('kpi-total').innerText = subs.length;
+  document.getElementById('kpi-mean').innerText = (totalScore / subs.length).toFixed(2);
+  document.getElementById('kpi-pass-rate').innerText = `${Math.round((passedCount / subs.length) * 100)}%`;
+  document.getElementById('kpi-range').innerText = `${minScore === 9999 ? 0 : minScore} - ${maxScore === -1 ? 0 : maxScore}`;
+}

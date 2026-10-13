@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ASPECT — Faculty Management & Autonomous OMR Hub</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+  <style>
+    .bubble-btn {
+      width: 32px; height: 32px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 0.72rem; border: 1.5px solid var(--bs-border-color);
+      background-color: var(--bs-body-bg); color: var(--bs-body-color); cursor: pointer;
+    }
+    .bubble-btn.active { background-color: var(--bs-primary) !important; color: #fff !important; border-color: var(--bs-primary) !important; }
+    #scanner-container { position: relative; width: 100%; max-width: 580px; margin: 0 auto; background: #000; border-radius: 12px; overflow: hidden; }
+    #scanner-video { width: 100%; height: auto; display: block; }
+    #scanner-canvas { width: 100%; height: auto; display: none; }
+    html, body { overflow-x: hidden; max-width: 100vw; -webkit-tap-highlight-color: transparent; }
+    .nav-pills.mobile-scroll { display: flex; flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; padding-bottom: 4px; }
+    .nav-pills.mobile-scroll::-webkit-scrollbar { display: none; }
+    .nav-pills.mobile-scroll .nav-item { flex: 0 0 auto; }
+    .btn-touch { min-height: 42px; display: inline-flex; align-items: center; justify-content: center; }
+  </style>
+  
+   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="teacher.js"></script>
+  <script src="scanner.js"></script>
+  <script src="js/config.js"></script>
+</head>
+<body class="bg-body-tertiary min-vh-100 pb-5">
+
+  <nav class="navbar border-bottom sticky-top bg-body shadow-sm py-2">
+    <div class="container-fluid px-3">
+      <div class="d-flex align-items-center gap-2 overflow-hidden">
+        <i class="bi bi-shield-lock-fill text-primary fs-4 flex-shrink-0"></i>
+        <div class="d-flex flex-column overflow-hidden">
+          <div class="d-flex align-items-center gap-2">
+            <span class="fw-bold fs-6 mb-0 text-truncate" style="line-height: 1.1;">ASPECT</span>
+            <span class="badge bg-success font-monospace" style="font-size: 0.65rem;">DUAL-TIER ENGINE</span>
+          </div>
+          <small class="text-body-secondary d-none d-sm-inline" style="font-size: 0.68rem;">Faculty Hub & Scoring</small>
+        </div>
+      </div>
+
+      <div class="d-flex align-items-center gap-1.5 ms-auto">
+        <select id="global-class-select" class="form-select form-select-sm fw-bold border-primary" 
+                style="max-width: 150px; font-size: 0.75rem;" onchange="onActiveClassChange(this.value)">
+          <option value="">Loading...</option>
+        </select>
+        <button class="btn btn-sm btn-primary px-2" id="btn-print-batch-omr" onclick="generateBatchPersonalizedPDF()" title="Print OMR Sheets">
+          <i class="bi bi-printer-fill"></i>
+          <span class="d-none d-md-inline ms-1">Print Batch</span>
+        </button>
+        <button class="btn btn-sm btn-outline-secondary rounded-circle" onclick="toggleTheme()" title="Toggle Theme">
+          <i class="bi bi-moon-stars-fill" id="theme-icon"></i>
+        </button>
+        <div class="dropdown">
+          <button class="btn btn-sm btn-outline-primary rounded-pill d-flex align-items-center gap-2 px-2.5 py-1" type="button" data-bs-toggle="dropdown">
+            <span class="rounded-circle bg-primary text-white fw-bold d-inline-flex align-items-center justify-content-center" style="width: 24px; height: 24px; font-size: 0.72rem;" id="nav-avatar">F</span>
+            <span class="fw-bold small d-none d-md-inline" id="nav-name">Instructor</span>
+          </button>
+          <ul class="dropdown-menu dropdown-menu-end shadow-sm">
+            <li><h6 class="dropdown-header" id="nav-id">Faculty ID: --</h6></li>
+            <li><hr class="dropdown-divider"></li>
+            <li><a class="dropdown-item text-danger" href="#" onclick="logoutTeacher(); return false;"><i class="bi bi-box-arrow-right"></i> Sign Out</a></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <main class="container-fluid px-3 mt-3" id="main-dashboard" style="display: none;">
+    <div class="px-0 mb-3">
+      <ul class="nav nav-pills mobile-scroll gap-1 pb-2 border-bottom">
+        <li class="nav-item">
+          <button class="nav-link active btn-sm fw-bold text-nowrap py-1.5 px-2.5" data-bs-toggle="pill" data-bs-target="#tab-classes" type="button">
+            <i class="bi bi-mortarboard-fill me-1"></i> Subjects
+          </button>
+        </li>
+        <li class="nav-item">
+          <button class="nav-link btn-sm fw-bold text-nowrap py-1.5 px-2.5 text-success" id="tab-scanner-btn" data-bs-toggle="pill" data-bs-target="#tab-scanner" type="button" onclick="initScanner()">
+            <i class="bi bi-camera-fill me-1"></i> Live Scanner
+          </button>
+        </li>
+        <li class="nav-item">
+          <button class="nav-link btn-sm fw-bold text-nowrap py-1.5 px-2.5" id="tab-submissions-btn" data-bs-toggle="pill" data-bs-target="#tab-submissions" type="button" onclick="loadSubmissionsLedger()">
+            <i class="bi bi-card-checklist me-1"></i> Grades
+          </button>
+        </li>
+        <li class="nav-item">
+          <button class="nav-link btn-sm fw-bold text-nowrap py-1.5 px-2.5" id="tab-enrollment-btn" data-bs-toggle="pill" data-bs-target="#tab-enrollment" type="button" onclick="loadSubjectEnrollment()">
+            <i class="bi bi-person-check-fill me-1"></i> Assign Roster
+          </button>
+        </li>
+        <li class="nav-item">
+          <button class="nav-link btn-sm fw-bold text-nowrap py-1.5 px-2.5" id="tab-builder-btn" data-bs-toggle="pill" data-bs-target="#tab-builder" type="button" onclick="loadExamBuilder()">
+            <i class="bi bi-ui-checks-grid me-1"></i> Exam Keys
+          </button>
+        </li>
+      </ul>
+    </div>
+
+    <div class="tab-content">
+      <!-- TAB 1: SUBJECTS -->
+      <div class="tab-pane fade show active" id="tab-classes">
+        <div class="card shadow-sm border mb-4">
+          <div class="card-body d-flex flex-wrap justify-content-between align-items-center gap-3">
+            <div>
+              <h5 class="fw-bold mb-1">Enrolled Subjects & Course Offerings</h5>
+              <p class="small text-body-secondary mb-0">Manage course blueprints, grading criteria, and rosters.</p>
+            </div>
+            <button class="btn btn-primary btn-sm fw-bold px-3 btn-touch" onclick="openClassModal()">
+              <i class="bi bi-plus-lg me-1"></i> Add New Subject
+            </button>
+          </div>
+        </div>
+        <div class="card shadow-sm border">
+          <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+              <thead class="table-light">
+                <tr class="small text-uppercase">
+                  <th>Code</th>
+                  <th>Subject Title</th>
+                  <th>Section</th>
+                  <th>Passing Mark</th>
+                  <th>Items</th>
+                  <th class="text-center" style="width: 260px;">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="classes-table-body">
+                <tr><td colspan="6" class="text-center py-4 text-body-secondary">Loading...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 2: ROSTER ASSIGNMENT -->
+      <div class="tab-pane fade" id="tab-enrollment">
+        <div class="card shadow-sm border mb-4 border-primary-subtle bg-primary-subtle">
+          <div class="card-body d-flex flex-wrap justify-content-between align-items-center gap-3 py-3">
+            <div>
+              <span class="badge bg-primary text-uppercase mb-1">Roster Assignment</span>
+              <h5 class="fw-bold text-primary-emphasis mb-0" id="enroll-subject-heading">Select Subject</h5>
+              <small class="text-body-secondary" id="enroll-subject-subheading">Manage examinees assigned to this subject.</small>
+            </div>
+            <div class="d-flex gap-2">
+              <button class="btn btn-outline-primary btn-sm fw-bold btn-touch" onclick="autoAssignBySection()">
+                <i class="bi bi-magic me-1"></i> Auto-Enroll Section
+              </button>
+              <button class="btn btn-success btn-sm fw-bold btn-touch" onclick="assignSelectedStudents()">
+                <i class="bi bi-person-check-fill me-1"></i> Assign Selected
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="row g-4">
+          <div class="col-lg-6">
+            <div class="card shadow-sm border h-100">
+              <div class="card-header bg-body py-2.5 d-flex justify-content-between align-items-center">
+                <span class="fw-bold small text-uppercase text-success"><i class="bi bi-check-circle-fill me-1"></i> Enrolled in Subject</span>
+                <span class="badge bg-success-subtle text-success" id="enrolled-count-badge">0 Enrolled</span>
+              </div>
+              <div class="table-responsive" style="max-height: 520px; overflow-y: auto;">
+                <table class="table table-hover align-middle mb-0">
+                  <thead class="table-light sticky-top">
+                    <tr class="small text-uppercase">
+                      <th>ID</th>
+                      <th>Student Name</th>
+                      <th>Section</th>
+                      <th class="text-center">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody id="enrolled-students-body"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <div class="col-lg-6">
+            <div class="card shadow-sm border h-100">
+              <div class="card-header bg-body py-2.5 d-flex justify-content-between align-items-center">
+                <span class="fw-bold small text-uppercase text-body-secondary"><i class="bi bi-person-plus me-1"></i> Available Roster</span>
+                <div class="d-flex align-items-center gap-2">
+                  <input type="checkbox" id="check-all-available" class="form-check-input" onchange="toggleSelectAllAvailable(this.checked)">
+                  <label for="check-all-available" class="small fw-bold">Select All</label>
+                </div>
+              </div>
+              <div class="table-responsive" style="max-height: 520px; overflow-y: auto;">
+                <table class="table table-hover align-middle mb-0">
+                  <thead class="table-light sticky-top">
+                    <tr class="small text-uppercase">
+                      <th style="width: 40px;"></th>
+                      <th>ID</th>
+                      <th>Student Name</th>
+                      <th>Section</th>
+                    </tr>
+                  </thead>
+                  <tbody id="available-students-body"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 3: ANSWER KEY BUILDER -->
+      <div class="tab-pane fade" id="tab-builder">
+        <div class="card shadow-sm border mb-4 border-primary-subtle bg-primary-subtle">
+          <div class="card-body d-flex flex-wrap justify-content-between align-items-center gap-3 py-3">
+            <div>
+              <span class="badge bg-primary text-uppercase mb-1">Exam Key Config</span>
+              <h5 class="fw-bold text-primary-emphasis mb-0" id="builder-class-heading">Select a Subject</h5>
+              <small class="text-body-secondary" id="builder-class-subheading">Items set here configure the evaluation template.</small>
+            </div>
+            <div class="d-flex align-items-center gap-2">
+              <div class="btn-group btn-group-sm me-2" role="group">
+                <input type="radio" class="btn-check" name="builder_set" id="b-set-a" value="A" checked onchange="switchBuilderSet('A')">
+                <label class="btn btn-outline-primary fw-bold" for="b-set-a">Set A</label>
+                <input type="radio" class="btn-check" name="builder_set" id="b-set-b" value="B" onchange="switchBuilderSet('B')">
+                <label class="btn btn-outline-primary fw-bold" for="b-set-b">Set B</label>
+              </div>
+              <button class="btn btn-outline-primary btn-sm fw-bold" onclick="addNewItem()"><i class="bi bi-plus-circle me-1"></i> Add</button>
+              <button class="btn btn-outline-secondary btn-sm fw-bold" data-bs-toggle="modal" data-bs-target="#batch-modal"><i class="bi bi-sliders me-1"></i> Batch</button>
+              <button class="btn btn-success btn-sm fw-bold px-3" id="btn-save-builder" onclick="saveExamBuilder()"><i class="bi bi-check2-circle me-1"></i> Save Keys</button>
+            </div>
+          </div>
+        </div>
+        <div class="card shadow-sm border">
+          <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+              <thead class="table-light">
+                <tr class="small text-uppercase">
+                  <th style="width: 70px;">Item</th>
+                  <th style="width: 200px;">Format</th>
+                  <th style="width: 90px;">Points</th>
+                  <th>Answer Key (Active Set)</th>
+                  <th style="width: 80px;" class="text-center">Remove</th>
+                </tr>
+              </thead>
+              <tbody id="builder-items-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 4: LIVE CAMERA SCANNER -->
+      <div class="tab-pane fade" id="tab-scanner">
+        <div class="row g-2">
+          <div class="col-12 col-md-7">
+            <div id="scanner-container" class="shadow-sm">
+              <video id="scanner-video" playsinline autoplay muted></video>
+              <canvas id="scanner-canvas"></canvas>
+
+              <div id="viewfinder-overlay" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;">
+                <div id="viewfinder-frame" style="position: absolute; top: 8%; bottom: 8%; left: 8%; right: 8%; border: 1.5px dashed rgba(255,255,255,0.35); border-radius: 8px; transition: border-color 0.2s ease;">
+                  <div class="target-bracket" id="bracket-tl" style="position: absolute; top: -3px; left: -3px; width: 32px; height: 32px; border-top: 4px solid #0d6efd; border-left: 4px solid #0d6efd; transition: border-color 0.2s ease;"></div>
+                  <div class="target-bracket" id="bracket-tr" style="position: absolute; top: -3px; right: -3px; width: 32px; height: 32px; border-top: 4px solid #0d6efd; border-right: 4px solid #0d6efd; transition: border-color 0.2s ease;"></div>
+                  <div class="target-bracket" id="bracket-bl" style="position: absolute; bottom: -3px; left: -3px; width: 32px; height: 32px; border-bottom: 4px solid #0d6efd; border-left: 4px solid #0d6efd; transition: border-color 0.2s ease;"></div>
+                  <div class="target-bracket" id="bracket-br" style="position: absolute; bottom: -3px; right: -3px; width: 32px; height: 32px; border-bottom: 4px solid #0d6efd; border-right: 4px solid #0d6efd; transition: border-color 0.2s ease;"></div>
+                </div>
+                <div id="align-instruction" style="position: absolute; bottom: 8px; width: 100%; text-align: center; color: #fff; font-size: 0.82rem; text-shadow: 0 1px 4px #000; font-weight: bold;">
+                  Point camera at the answer sheet
+                </div>
+              </div>
+            </div>
+
+            <div class="d-flex justify-content-between align-items-center gap-2 mt-2">
+              <button class="btn btn-primary fw-bold flex-grow-1 btn-touch" id="btn-capture" onclick="processCameraFrame()">
+                <i class="bi bi-camera-fill me-1"></i> Scan & Grade Sheet
+              </button>
+              <button class="btn btn-outline-secondary btn-touch px-3" id="btn-retake" onclick="resetToLiveCamera()" style="display: none;">
+                <i class="bi bi-arrow-counterclockwise fs-5"></i> Retake
+              </button>
+              <button class="btn btn-outline-secondary btn-touch px-3" onclick="restartCamera()">
+                <i class="bi bi-arrow-repeat fs-5"></i>
+              </button>
+            </div>
+          </div>
+
+          <div class="col-12 col-md-5">
+            <div class="card border shadow-sm">
+              <div class="card-body p-3">
+                <div id="examinee-card" class="p-2 mb-2 rounded border bg-light d-flex align-items-center gap-2">
+                  <div class="rounded-circle bg-secondary text-white fw-bold d-flex align-items-center justify-content-center flex-shrink-0" style="width: 38px; height: 38px; font-size: 0.85rem;" id="examinee-avatar">?</div>
+                  <div class="flex-grow-1 overflow-hidden">
+                    <div class="fw-bold small text-truncate" id="examinee-name">No Student Identified</div>
+                    <div class="text-body-secondary font-monospace" style="font-size: 0.72rem;" id="examinee-meta">Align sheet with QR code</div>
+                  </div>
+                  <span class="badge bg-secondary" id="examinee-badge" style="font-size: 0.65rem;">PENDING</span>
+                </div>
+
+                <div class="row g-2 mb-2">
+                  <div class="col-7">
+                    <label class="form-label small fw-bold text-body-secondary mb-0">Manual Select</label>
+                    <select id="scan-student-select" class="form-select form-select-sm font-monospace" onchange="onStudentSelectChange(this.value)">
+                      <option value="">Roster Selector...</option>
+                    </select>
+                    <input type="hidden" id="scan-detected-id">
+                  </div>
+                  <div class="col-5">
+                    <label class="form-label small fw-bold text-body-secondary mb-0">Exam Set</label>
+                    <div class="d-flex gap-2 mt-1">
+                      <div class="form-check form-check-inline me-1">
+                        <input class="form-check-input" type="radio" name="scan_set" id="scan_set_a" value="A" checked onchange="onSetSelectorChange('A')">
+                        <label class="form-check-label fw-bold small" for="scan_set_a">A</label>
+                      </div>
+                      <div class="form-check form-check-inline me-0">
+                        <input class="form-check-input" type="radio" name="scan_set" id="scan_set_b" value="B" onchange="onSetSelectorChange('B')">
+                        <label class="form-check-label fw-bold small" for="scan_set_b">B</label>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="card bg-body-tertiary border p-2 text-center mb-2">
+                  <div class="fs-3 fw-bold text-primary" id="scan-score-display">0 / 0</div>
+                  <div class="small fw-semibold" id="scan-grade-display">Ready for scan</div>
+                </div>
+
+                <div class="mb-2">
+                  <label class="form-label small fw-bold text-body-secondary mb-1">Itemized Answer Review</label>
+                  <div id="ai-breakdown-container" class="border rounded p-1 bg-white font-monospace text-dark" style="max-height: 150px; overflow-y: auto; font-size: 0.75rem;">
+                    <span class="text-muted d-block text-center py-2">No scan data yet.</span>
+                  </div>
+                </div>
+
+                <button class="btn btn-success w-100 fw-bold btn-touch" id="btn-save-scan" onclick="submitScannedResult()" disabled>
+                  <i class="bi bi-cloud-arrow-up-fill me-1"></i> Save Grade to Roster
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 5: GRADES LEDGER -->
+      <div class="tab-pane fade" id="tab-submissions">
+        <div class="row g-3 mb-4">
+          <div class="col-md-3">
+            <div class="card border shadow-sm p-3">
+              <span class="small fw-bold text-body-secondary text-uppercase">Total Scanned</span>
+              <h4 class="fw-bold mb-0 mt-1" id="kpi-total">0</h4>
+            </div>
+          </div>
+          <div class="col-md-3">
+            <div class="card border shadow-sm p-3">
+              <span class="small fw-bold text-body-secondary text-uppercase">Mean Grade</span>
+              <h4 class="fw-bold mb-0 mt-1 text-primary" id="kpi-mean">0.00</h4>
+            </div>
+          </div>
+          <div class="col-md-3">
+            <div class="card border shadow-sm p-3">
+              <span class="small fw-bold text-body-secondary text-uppercase">Passing Rate</span>
+              <h4 class="fw-bold mb-0 mt-1 text-success" id="kpi-pass-rate">0%</h4>
+            </div>
+          </div>
+          <div class="col-md-3">
+            <div class="card border shadow-sm p-3">
+              <span class="small fw-bold text-body-secondary text-uppercase">Score Range</span>
+              <h4 class="fw-bold mb-0 mt-1" id="kpi-range">0 - 0</h4>
+            </div>
+          </div>
+        </div>
+        <div class="card shadow-sm border">
+          <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+              <thead class="table-light">
+                <tr class="small text-uppercase">
+                  <th>Examinee</th>
+                  <th>ID</th>
+                  <th>Set</th>
+                  <th>Raw Score</th>
+                  <th>Percentage</th>
+                  <th>Status</th>
+                  <th>Scanned Time</th>
+                </tr>
+              </thead>
+              <tbody id="submissions-table-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- SUBJECT MODAL -->
+  <div class="modal fade" id="class-modal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content border shadow">
+        <div class="modal-header border-bottom">
+          <h6 class="modal-title fw-bold" id="modal-class-title">Create / Edit Subject</h6>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <form id="class-form" onsubmit="handleSaveClass(event)">
+          <div class="modal-body d-flex flex-column gap-3">
+            <input type="hidden" id="modal-class-id">
+            <div>
+              <label class="form-label small fw-bold">Subject Code</label>
+              <input type="text" id="modal-sub-code" class="form-control font-monospace" placeholder="e.g. ECE 312" required>
+            </div>
+            <div>
+              <label class="form-label small fw-bold">Subject Title</label>
+              <input type="text" id="modal-sub-title" class="form-control" placeholder="Feedback and Control Systems" required>
+            </div>
+            <div>
+              <label class="form-label small fw-bold">Default Section</label>
+              <input type="text" id="modal-sub-section" class="form-control" placeholder="BS-ECE 3A" required>
+            </div>
+            <div>
+              <label class="form-label small fw-bold">Passing Percentage (%)</label>
+              <div class="input-group">
+                <input type="number" id="modal-sub-pass" class="form-control font-monospace fw-bold" min="1" max="100" value="70" required>
+                <span class="input-group-text fw-bold">%</span>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer border-top">
+            <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+            <button type="submit" class="btn btn-primary btn-sm fw-bold">Save Subject</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- BATCH BUILDER MODAL -->
+  <div class="modal fade" id="batch-modal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content border shadow">
+        <div class="modal-header border-bottom">
+          <h6 class="modal-title fw-bold">Batch Key Generator</h6>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body d-flex flex-column gap-3">
+          <div>
+            <label class="form-label small fw-bold">Multiple Choice (MCQ) Count</label>
+            <input type="number" id="batch-mcq-count" class="form-control" value="50" min="0">
+          </div>
+          <div>
+            <label class="form-label small fw-bold">True/False (TF) Count</label>
+            <input type="number" id="batch-tf-count" class="form-control" value="0" min="0">
+          </div>
+        </div>
+        <div class="modal-footer border-top">
+          <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-primary btn-sm fw-bold" onclick="applyBatchGenerator()">Generate</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+ 
+</body>
+</html>
