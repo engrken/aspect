@@ -1,6 +1,5 @@
 /**
  * ASPECT Engine — Optical Mark Recognition & Vision Pipeline
- * Dual-Tier Registration: Piecewise 50-Item Half-Sheet & 100-Item Full Sheet
  * Backed by Python/FastAPI OpenCV Serverless Engine
  */
 
@@ -536,7 +535,6 @@ async function processCameraFrame() {
   document.getElementById('viewfinder-overlay').style.display = 'none';
   document.getElementById('btn-retake').style.display = 'inline-block';
   
-  // Hand off grading to Python Serverless endpoint
   evaluateWarpedExam100(activeSet, keyItems);
 }
 
@@ -546,14 +544,12 @@ function onSetSelectorChange(newSet) {
   }
 }
 
-// Unified call to Python endpoint (handles both 50 and 100 item formats seamlessly)
 async function evaluateWarpedExam100(testSet, keyItems) {
   if (!cachedWarpedData) return;
   const displayCanvas = document.getElementById('scanner-canvas');
   const warpCtx = displayCanvas.getContext('2d');
   warpCtx.putImageData(cachedWarpedData, 0, 0);
 
-  // Convert aligned canvas to Base64 to send to Python OpenCV
   const base64Image = displayCanvas.toDataURL('image/jpeg', 0.9);
   const activeStudentId = document.getElementById('scan-detected-id').value.trim();
 
@@ -561,6 +557,7 @@ async function evaluateWarpedExam100(testSet, keyItems) {
 
   const payload = {
     action: 'AI_VISION_GRADE',
+    sessionToken: sessionToken,
     classId: activeClassId,
     studentId: activeStudentId,
     testSet: testSet,
@@ -576,7 +573,6 @@ async function evaluateWarpedExam100(testSet, keyItems) {
     return;
   }
 
-  // Update UI with Python results
   document.getElementById('scan-score-display').innerText = `${res.rawScore} / ${res.totalPoints}`;
   document.getElementById('scan-grade-display').innerHTML = `
     <div class="d-flex align-items-center justify-content-center gap-2 mb-1">
@@ -585,7 +581,6 @@ async function evaluateWarpedExam100(testSet, keyItems) {
     </div>
   `;
 
-  // Render Table Breakdown from Python
   const breakdownContainer = document.getElementById('ai-breakdown-container');
   if (breakdownContainer && res.itemBreakdown) {
     let html = `<table class="table table-sm table-borderless mb-0" style="font-size: 0.73rem;">
@@ -618,7 +613,6 @@ async function evaluateWarpedExam100(testSet, keyItems) {
   if (activeStudentId) document.getElementById('btn-save-scan').disabled = false;
 }
 
-// Redirect piecewise scans to the unified Python endpoint
 function evaluateWarpedExamPiecewise(testSet, keyItems) {
    evaluateWarpedExam100(testSet, keyItems);
 }
@@ -640,14 +634,14 @@ async function submitScannedResult() {
       studentId: studentId,
       testSet: lastScannedData.testSet,
       answers: lastScannedData.answers,
-      items: builderItems // Sent so backend can reliably recount final grade before insert
+      items: builderItems
     });
 
     btn.disabled = false;
     btn.innerHTML = `<i class="bi bi-cloud-arrow-up-fill me-1"></i> Save Grade to Roster`;
 
     if (res.success) {
-      alert(`Grade recorded!\nRaw: ${res.rawScore}/${res.totalPoints} (${res.percentage}% - ${res.status})`);
+      alert(`Grade recorded for ${res.fullName}!\nRaw: ${res.rawScore}/${res.totalPoints} (${res.percentage}% - ${res.status})`);
       document.getElementById('scan-detected-id').value = "";
       document.getElementById('scan-student-select').value = "";
       matchAndDisplayStudent('', false);
