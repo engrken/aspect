@@ -3,13 +3,11 @@ import cv2
 import numpy as np
 
 def decode_qr_opencv(gray_img):
-    """Attempts to decode the student QR code from the top-right meta box with CLAHE contrast enhancement and 3.0x upscaling."""
     try:
         detector = cv2.QRCodeDetector()
         h, w = gray_img.shape
         qr_crop = gray_img[int(h * 0.04):int(h * 0.32), int(w * 0.60):w]
         
-        # Apply Adaptive Histogram Equalization to fix lighting issues
         clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8,8))
         enhanced = clahe.apply(qr_crop)
         
@@ -240,8 +238,8 @@ def grade_sheet_opencv(image_bytes, items, test_set):
         student_ans = None
         is_double_shaded = False
 
-        if drop_from_lightest >= 22.0 and darkest['lum'] < 135.0:
-            if separation < 10.0 and (lightest['lum'] - second_darkest['lum']) >= 22.0:
+        if drop_from_lightest >= 18.0 and darkest['lum'] < 145.0:
+            if separation < 9.0 and (lightest['lum'] - second_darkest['lum']) >= 18.0:
                 student_ans = f"{darkest['opt']},{second_darkest['opt']}"
                 is_double_shaded = True
             else:
@@ -288,7 +286,7 @@ def grade_sheet_opencv(image_bytes, items, test_set):
                 bubbles_overlay.append({
                     'x': b['x'] if was_marked else b['grid_x'],
                     'y': b['y'] if was_marked else b['grid_y'],
-                    'r': 6.0 if not is_form_100 else 5.2,
+                    'r': 5.8 if not is_form_100 else 4.8,
                     'state': state
                 })
 

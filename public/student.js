@@ -1,6 +1,3 @@
-/**
- * ASPECT — Password Authentication, Student Self-Registration & Results Controller
- */
 const API_BASE_URL = window.ASPECT_CONFIG?.API_URL || '/api';
 
 let currentUser = null;
@@ -253,7 +250,15 @@ function renderResults(results) {
   document.getElementById('results-count').innerText = `${results.length} Recorded`;
 
   if (results.length === 0) {
-    // (Existing Empty State rendering)
+    container.innerHTML = `
+      <div class="col-12">
+        <div class="card p-5 text-center border-dashed">
+          <i class="bi bi-folder2-open display-4 text-body-tertiary mb-2"></i>
+          <h6 class="fw-bold text-body-secondary">No Exam Scores Recorded Yet</h6>
+          <p class="small text-body-secondary mb-0">Your exam records will populate here once evaluated.</p>
+        </div>
+      </div>`;
+    return;
   }
 
   results.forEach(item => {
@@ -301,5 +306,4 @@ function renderResults(results) {
 function viewStudentSheet(base64Str) {
   document.getElementById('student-scanned-img').src = "data:image/jpeg;base64," + base64Str;
   new bootstrap.Modal(document.getElementById('view-sheet-modal')).show();
-}
 }

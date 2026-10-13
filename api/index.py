@@ -264,6 +264,13 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             db.commit()
             return {"success": True, "classId": cid}
 
+        elif act == "DELETE_CLASS":
+            db.query(CourseClass).filter_by(class_id=payload.classId).delete()
+            db.query(ExamItem).filter_by(class_id=payload.classId).delete()
+            db.query(Enrollment).filter_by(class_id=payload.classId).delete()
+            db.commit()
+            return {"success": True}
+
         elif act == "GET_FULL_EXAM_CONFIG":
             items = db.query(ExamItem).filter_by(class_id=payload.classId).order_by(ExamItem.item_no.asc()).all()
             return {
@@ -308,6 +315,35 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                 else:
                     available.append(s_dict)
             return {"success": True, "enrolledStudents": enrolled, "availableStudents": available}
+
+        elif act in ["ASSIGN_STUDENTS", "ASSIGN_STUDENTS_TO_CLASS"]:
+            existing = {
+                e.student_id.upper()
+                for e in db.query(Enrollment).filter_by(class_id=payload.classId).all()
+            }
+            for sid in (payload.studentIds or []):
+                if sid.upper() not in existing:
+                    db.add(Enrollment(class_id=payload.classId, student_id=sid))
+            db.commit()
+            return {"success": True}
+
+        elif act == "AUTO_ASSIGN_SECTION":
+            sec = (payload.section or "").strip().upper()
+            matching = db.query(RosterUser).filter(RosterUser.role != "TEACHER").all()
+            existing = {
+                e.student_id.upper()
+                for e in db.query(Enrollment).filter_by(class_id=payload.classId).all()
+            }
+            for s in matching:
+                if s.section.strip().upper() == sec and s.student_id.upper() not in existing:
+                    db.add(Enrollment(class_id=payload.classId, student_id=s.student_id))
+            db.commit()
+            return {"success": True}
+
+        elif act == "UNASSIGN_STUDENT":
+            db.query(Enrollment).filter_by(class_id=payload.classId, student_id=payload.studentId).delete()
+            db.commit()
+            return {"success": True}
 
         elif act == "AI_VISION_GRADE":
             encoded = payload.base64Image.split(",")[1] if "," in payload.base64Image else payload.base64Image
@@ -438,6 +474,39 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                     } for s in subs
                 ]
             }
+
+        # Keep Faculty Account logic (GET_FACULTY, REGISTER_FACULTY, DELETE_FACULTY, CHANGE_PASSWORD)
+        elif act == "GET_FACULTY":
+            teachers = db.query(RosterUser).filter_by(role="TEACHER").order_by(RosterUser.student_id.asc()).all()
+            return {"success": True, "faculty": [{"facultyId": t.student_id, "fullName": t.full_name, "email": t.email, "department": t.section} for t in teachers]}
+        elif act == "REGISTER_FACULTY":
+            fd = payload.facultyData or {}
+            fid = (fd.get("facultyId") or "").strip().upper()
+            fname = (fd.get("fullName") or "").strip()
+            femail = (fd.get("email") or "").strip().lower()
+            fdept = (fd.get("department") or "College of Engineering").strip()
+            fpwd = (fd.get("password") or "").strip()
+            if not fid or not fname or not fpwd: return {"success": False, "message": "Missing required fields."}
+            existing = db.query(RosterUser).filter(RosterUser.student_id.ilike(fid)).first()
+            if existing:
+                existing.full_name = fname; existing.email = femail; existing.section = fdept; existing.role = "TEACHER"; existing.password_hash = hash_password(fpwd)
+                db.commit()
+                return {"success": True, "message": "Faculty account updated."}
+            db.add(RosterUser(student_id=fid, email=femail, full_name=fname, section=fdept, role="TEACHER", password_hash=hash_password(fpwd)))
+            db.commit()
+            return {"success": True, "message": "Faculty account registered."}
+        elif act == "DELETE_FACULTY":
+            target_id = (payload.facultyId or "").strip().upper()
+            if target_id in ["FACULTY-01", user.student_id.upper()]: return {"success": False, "message": "Cannot delete admin or self."}
+            db.query(RosterUser).filter(RosterUser.student_id.ilike(target_id)).delete()
+            db.commit()
+            return {"success": True}
+        elif act == "CHANGE_PASSWORD":
+            new_pw = (payload.newPassword or "").strip()
+            if len(new_pw) < 6: return {"success": False, "message": "Password too short."}
+            user.password_hash = hash_password(new_pw)
+            db.commit()
+            return {"success": True, "message": "Password updated successfully."}
 
         return {"success": False, "message": f"Action '{act}' not supported."}
     except Exception as e:

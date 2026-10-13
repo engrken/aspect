@@ -1,6 +1,3 @@
-/**
- * ASPECT — Faculty Hub & System Admin Controller
- */
 const API_BASE_URL = window.ASPECT_CONFIG?.API_URL || '/api';
 
 let sessionToken = localStorage.getItem('aspect_token') || '';
@@ -10,6 +7,7 @@ let builderItems = [];
 var enrolledStudentsList = [];
 let allStudentsList = [];
 let activeBuilderSet = 'A';
+let currentSubmissions = [];
 
 async function callApi(payload) {
   try {
@@ -555,9 +553,7 @@ async function saveExamBuilder() {
   }
 }
 
-// --- SUBMISSIONS LEDGER ---
-
-let currentSubmissions = [];
+// --- SUBMISSIONS LEDGER & MANUAL OVERRIDE ---
 
 async function loadSubmissionsLedger() {
   if (!activeClassId) return;
@@ -666,10 +662,4 @@ async function handleUpdateScore(e) {
   } else {
     alert("Error updating score: " + res.message);
   }
-}
-
-  document.getElementById('kpi-total').innerText = subs.length;
-  document.getElementById('kpi-mean').innerText = (totalScore / subs.length).toFixed(2);
-  document.getElementById('kpi-pass-rate').innerText = `${Math.round((passedCount / subs.length) * 100)}%`;
-  document.getElementById('kpi-range').innerText = `${minScore === 9999 ? 0 : minScore} - ${maxScore === -1 ? 0 : maxScore}`;
 }

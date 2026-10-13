@@ -1,6 +1,6 @@
 /**
- * ASPECT Engine — Scale-Invariant Vector OMR Scanner
- * Paper-Size Independent via Inset Fiducial Homography ((12,12) -> (388, H-12))
+ * ASPECT Engine — Optical Mark Recognition & Vision Pipeline
+ * Outer-Quadrant Fiducial Lock + High-Res QR Decoder
  */
 
 let videoStream = null;
@@ -342,10 +342,6 @@ function findFourCornersRobust(imgData, W, H) {
   return { tl, tr, bl, br };
 }
 
-/**
- * Maps the 4 detected fiducial centroids directly to their exact SVG viewBox coordinates:
- * TL=(12, 12), TR=(dstW-12, 12), BR=(dstW-12, dstH-12), BL=(12, dstH-12)
- */
 function warpPerspectiveToCanvas(srcImgData, corners, dstCtx, dstW, dstH) {
   const src = [
     corners.tl.x, corners.tl.y,
@@ -631,7 +627,6 @@ async function evaluateWarpedExam100(testSet, keyItems) {
     matchAndDisplayStudent(activeStudentId, true);
   }
 
-  // If the student shaded a Set A / Set B bubble on the paper, update the radio button UI
   if (res.detectedSet) {
     const radioEl = document.getElementById(res.detectedSet === 'B' ? 'scan_set_b' : 'scan_set_a');
     if (radioEl) radioEl.checked = true;
@@ -688,7 +683,8 @@ async function evaluateWarpedExam100(testSet, keyItems) {
     rawScore: res.rawScore,
     totalPoints: res.totalPoints,
     percentage: res.percentage,
-    isPassed: res.isPassed
+    isPassed: res.isPassed,
+    warpedBase64: res.warpedBase64 || base64Image
   };
 
   if (activeStudentId) {

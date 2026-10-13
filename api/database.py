@@ -89,7 +89,6 @@ class Submission(Base):
     percentage = Column(Float)
     is_passed = Column(Boolean)
     answers = Column(JSON)
-    # NEW: Stores the warped Base64 JPEG for review
     scanned_image = Column(String, default="")
 
 def ensure_seeded(db):
