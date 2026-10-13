@@ -3,11 +3,11 @@ import cv2
 import numpy as np
 
 def decode_qr_opencv(gray_img):
-    """Attempts to decode the student QR code from the image."""
+    """Attempts to decode the student QR code from the top-right meta box."""
     try:
         detector = cv2.QRCodeDetector()
         h, w = gray_img.shape
-        qr_crop = gray_img[int(h * 0.04):int(h * 0.42), int(w * 0.55):w]
+        qr_crop = gray_img[int(h * 0.05):int(h * 0.36), int(w * 0.55):w]
         for candidate in [qr_crop, gray_img]:
             data, _, _ = detector.detectAndDecode(candidate)
             if data:
@@ -22,12 +22,14 @@ def decode_qr_opencv(gray_img):
 
 def auto_warp_sheet_opencv(gray_img, is_form_100=False):
     """
-    If the image is an unwarped raw camera frame (width != 400),
-    locates the 4 corner fiducial squares using multi-threshold connected components
-    and warps the sheet to canonical coordinates.
+    If the image is already warped to canonical size (400x450 or 400x570), returns it directly.
+    Otherwise locates the 4 corner fiducial squares and perspective-warps the sheet.
     """
     H, W = gray_img.shape
-    if W == 400 and H in (450, 462, 570, 580):
+    canon_w = 400
+    canon_h = 570 if is_form_100 else 450
+
+    if W == canon_w and H == canon_h:
         return gray_img, None
 
     min_lum = float(np.percentile(gray_img, 2))
@@ -35,8 +37,7 @@ def auto_warp_sheet_opencv(gray_img, is_form_100=False):
     best_quad = None
     best_score = -1.0
 
-    # Try tight-to-medium thresholds so .f-bl never fuses with "15."
-    for factor in (0.25, 0.30, 0.36, 0.42):
+    for factor in (0.28, 0.35, 0.42):
         thresh_val = int(min_lum + (max_lum - min_lum) * factor)
         _, binary = cv2.threshold(gray_img, thresh_val, 255, cv2.THRESH_BINARY_INV)
         num_labels, _, stats, centroids = cv2.connectedComponentsWithStats(binary)
@@ -51,7 +52,7 @@ def auto_warp_sheet_opencv(gray_img, is_form_100=False):
                 aspect = bw / float(bh)
                 if 0.65 <= aspect <= 1.50:
                     solidity = area / float(bw * bh)
-                    if solidity >= 0.62:
+                    if solidity >= 0.65:
                         cx, cy = centroids[i]
                         candidates.append({
                             'x': float(cx),
@@ -84,7 +85,7 @@ def auto_warp_sheet_opencv(gray_img, is_form_100=False):
                 bl, br, bot_w = horiz_pairs[j]
                 lh = bl['y'] - tl['y']
                 rh = br['y'] - tr['y']
-                if lh < W * 0.22 or rh < W * 0.22:
+                if lh < W * 0.25 or rh < W * 0.25:
                     continue
                 if abs(bl['x'] - tl['x']) > lh * 0.22 or abs(br['x'] - tr['x']) > rh * 0.22:
                     continue
@@ -95,7 +96,7 @@ def auto_warp_sheet_opencv(gray_img, is_form_100=False):
                 avg_w = (top_w + bot_w) * 0.5
                 avg_h = (lh + rh) * 0.5
                 ratio = avg_h / avg_w
-                if not (0.48 <= ratio <= 1.85):
+                if not (0.75 <= ratio <= 1.65):
                     continue
 
                 score = (avg_w * avg_h) * (1.0 - w_diff) * (1.0 - h_diff)
@@ -105,10 +106,6 @@ def auto_warp_sheet_opencv(gray_img, is_form_100=False):
 
         if best_quad is not None:
             break
-
-    canon_w = 400
-    fid_h = 570 if is_form_100 else 450
-    canon_h = 580 if is_form_100 else 462
 
     if best_quad is not None:
         tl, tr, br, bl = best_quad
@@ -121,18 +118,17 @@ def auto_warp_sheet_opencv(gray_img, is_form_100=False):
         dst_pts = np.array([
             [0, 0],
             [canon_w, 0],
-            [canon_w, fid_h],
-            [0, fid_h]
+            [canon_w, canon_h],
+            [0, canon_h]
         ], dtype=np.float32)
         M = cv2.getPerspectiveTransform(src_pts, dst_pts)
         warped = cv2.warpPerspective(gray_img, M, (canon_w, canon_h), borderValue=255)
-        _, buf = cv2.imencode('.jpg', warped, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+        _, buf = cv2.imencode('.jpg', warped, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
         warped_b64 = base64.b64encode(buf).decode('utf-8')
         return warped, warped_b64
 
-    # Fallback resize if no fiducials found
     resized = cv2.resize(gray_img, (canon_w, canon_h))
-    _, buf = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+    _, buf = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
     return resized, base64.b64encode(buf).decode('utf-8')
 
 def grade_sheet_opencv(image_bytes, items, test_set):
@@ -156,31 +152,30 @@ def grade_sheet_opencv(image_bytes, items, test_set):
 
     item_coords = {}
     if is_form_100:
+        # Exact coordinates for .omr-box-100 (680x640 -> 400x570)
         col_xs = [
-            [29.5, 37.5, 45.5, 53.5],
-            [125.5, 133.5, 141.5, 149.5],
-            [221.5, 229.5, 237.5, 245.5],
-            [317.5, 325.5, 333.5, 341.5]
+            [35.47, 47.09, 58.72, 70.34],
+            [132.11, 143.73, 155.35, 166.97],
+            [228.75, 240.37, 251.99, 263.61],
+            [325.38, 337.00, 348.62, 360.24]
         ]
-        row_start_y = 101.5
-        row_pitch = 9.42
+        row_start_y = 128.11
+        row_pitch = 16.710
         for c in range(4):
             for r in range(25):
                 item_coords[c * 25 + r + 1] = (col_xs[c], int(round(row_start_y + r * row_pitch)))
         box_r = 4
     else:
+        # Exact coordinates for .omr-box-50 (464x492 -> 400x450)
         col_xs = [
-            [76.6, 90.8, 104.8, 119.0],
-            [209.8, 223.9, 237.9, 252.0],
-            [342.7, 356.7, 370.8, 384.8]
+            [47.49, 64.84, 82.19, 99.54],
+            [177.17, 194.52, 211.87, 229.22],
+            [306.85, 324.20, 341.55, 358.90]
         ]
-        max_bot_rows = 0 if total_items <= 8 else min(9, total_items - 8)
-        if max_bot_rows > 0:
-            total_h_css = 307.0 + (max_bot_rows - 1) * 17.5
-        else:
-            total_h_css = 289.5
+        top_row1_y = 133.26
+        bot_row9_y = 287.77
+        row_pitch = 17.382
 
-        scale_y = 450.0 / total_h_css
         cols_def = [
             (0, 1, 8, 9, 17),
             (1, 18, 25, 26, 34),
@@ -189,12 +184,10 @@ def grade_sheet_opencv(image_bytes, items, test_set):
         for col_idx, ts, te, bs, be in cols_def:
             for i in range(ts, te + 1):
                 r = i - ts
-                y_css = 149.0 + r * 17.5
-                item_coords[i] = (col_xs[col_idx], int(round(y_css * scale_y)))
+                item_coords[i] = (col_xs[col_idx], int(round(top_row1_y + r * row_pitch)))
             for i in range(bs, be + 1):
                 b = i - bs
-                y_css = 307.0 + b * 17.5
-                item_coords[i] = (col_xs[col_idx], int(round(y_css * scale_y)))
+                item_coords[i] = (col_xs[col_idx], int(round(bot_row9_y + b * row_pitch)))
         box_r = 4
 
     detected_answers = {}
@@ -240,7 +233,7 @@ def grade_sheet_opencv(image_bytes, items, test_set):
         student_ans = None
         is_double_shaded = False
 
-        if drop_from_lightest >= 20.0 and darkest['lum'] < 120.0:
+        if drop_from_lightest >= 20.0 and darkest['lum'] < 130.0:
             if separation < 10.0 and (lightest['lum'] - second_darkest['lum']) >= 20.0:
                 student_ans = f"{darkest['opt']},{second_darkest['opt']}"
                 is_double_shaded = True
@@ -288,7 +281,7 @@ def grade_sheet_opencv(image_bytes, items, test_set):
                 bubbles_overlay.append({
                     'x': b['x'],
                     'y': b['y'],
-                    'r': 5.8 if not is_form_100 else 4.2,
+                    'r': 6.0 if not is_form_100 else 4.5,
                     'state': state
                 })
 

@@ -565,7 +565,7 @@ async function processCameraFrame(preDetectedCorners = null, preProbeH = null) {
   const isForm100 = keyItems.length > 50;
   const CANON_W = 400;
   const FIDUCIAL_H = isForm100 ? 570 : 450;
-  const CANON_H = isForm100 ? 580 : 462;
+  const CANON_H = FIDUCIAL_H;
 
   displayCanvas.width = CANON_W;
   displayCanvas.height = CANON_H;
