@@ -1,6 +1,6 @@
 /**
  * ASPECT Engine — Optical Mark Recognition & Vision Pipeline
- * Calibrated for 1-50 Item Half-Sheets & 51-100 Item Full Sheets
+ * Client + Server OpenCV Hybrid Registration (1-50 & 51-100 Item Sheets)
  */
 
 let videoStream = null;
@@ -141,10 +141,10 @@ function updateTargetUI(isLocked) {
 
   if (label) {
     if (isLocked) {
-      label.innerText = `Corners Locked! Hold steady (${stableAlignmentCount}/${REQUIRED_STABLE_FRAMES})...`;
+      label.innerText = `Corners Locked! Capturing (${stableAlignmentCount}/${REQUIRED_STABLE_FRAMES})...`;
       label.style.color = '#20c997';
     } else {
-      label.innerText = "Align the 4 corner black squares inside the frame";
+      label.innerText = "Fit the 4 corner black squares inside the frame (or tap Scan)";
       label.style.color = '#ffffff';
     }
   }
@@ -178,7 +178,7 @@ function startAutoScanLoop() {
         stopAutoScanLoop();
         if (navigator.vibrate) navigator.vibrate(60);
         try {
-          await processCameraFrame();
+          await processCameraFrame(corners, probeH);
         } catch (err) {
           console.error("Auto-scan error:", err);
           resetToLiveCamera();
@@ -201,16 +201,15 @@ function stopAutoScanLoop() {
 }
 
 /**
- * Quad-Extremal Fiducial Detector
- * Eliminates 2x2 parity duplicates, rejects keyboard/text noise, and finds true sheet corners.
+ * Separates .f-bl from "15." using tight core thresholding (0.28) + 1px flood-fill
+ * and locks onto the parallel Left/Right fiducial rails.
  */
 function findFourCornersRobust(imgData, W, H) {
   const data = imgData.data;
 
-  // Sample luminance inside central 85% of frame to ignore dark bezels
   let minLum = 255, maxLum = 0;
-  const marginX = Math.floor(W * 0.06);
-  const marginY = Math.floor(H * 0.06);
+  const marginX = Math.floor(W * 0.05);
+  const marginY = Math.floor(H * 0.05);
   for (let y = marginY; y < H - marginY; y += 8) {
     for (let x = marginX; x < W - marginX; x += 8) {
       const idx = (y * W + x) * 4;
@@ -220,23 +219,20 @@ function findFourCornersRobust(imgData, W, H) {
     }
   }
 
-  if (maxLum - minLum < 35) return null;
-  const darkThreshold = minLum + (maxLum - minLum) * 0.42;
+  if (maxLum - minLum < 30) return null;
+  // Tight 0.28 threshold prevents .f-bl from bridging across the 2px gap into "15."
+  const darkThreshold = minLum + (maxLum - minLum) * 0.28;
 
   const visited = new Uint8Array(W * H);
   const candidates = [];
-  const minDim = Math.min(W, H);
-  const minSize = Math.max(9, Math.floor(minDim * 0.014));
-  const maxSize = Math.max(36, Math.floor(minDim * 0.075));
+  const minSize = 8;
+  const maxSize = 36;
 
-  const qX = new Int32Array(4500);
-  const qY = new Int32Array(4500);
+  const qX = new Int32Array(3000);
+  const qY = new Int32Array(3000);
 
-  // Step by 2 on even coordinates so 2-pixel BFS stays on an exact lattice (zero duplicates)
-  const startY = Math.floor(H * 0.04) & ~1;
-  const endY = H - startY;
-  const startX = Math.floor(W * 0.04) & ~1;
-  const endX = W - startX;
+  const startY = 8, endY = H - 8;
+  const startX = 8, endX = W - 8;
 
   for (let sy = startY; sy < endY; sy += 2) {
     for (let sx = startX; sx < endX; sx += 2) {
@@ -255,21 +251,20 @@ function findFourCornersRobust(imgData, W, H) {
       visited[vIdx] = 1;
 
       let bMinX = sx, bMaxX = sx, bMinY = sy, bMaxY = sy;
-      let sumX = 0, sumY = 0, sumLum = 0, count = 0;
+      let sumX = 0, sumY = 0, count = 0;
 
+      // 1-pixel step BFS so thin gaps are respected accurately
       while (head < tail) {
         const cx = qX[head], cy = qY[head];
         head++; count++;
         sumX += cx; sumY += cy;
-        const cIdx = (cy * W + cx) * 4;
-        sumLum += 0.299 * data[cIdx] + 0.587 * data[cIdx + 1] + 0.114 * data[cIdx + 2];
 
         if (cx < bMinX) bMinX = cx;
         if (cx > bMaxX) bMaxX = cx;
         if (cy < bMinY) bMinY = cy;
         if (cy > bMaxY) bMaxY = cy;
 
-        const neighbors = [[cx + 2, cy], [cx - 2, cy], [cx, cy + 2], [cx, cy - 2]];
+        const neighbors = [[cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]];
         for (let i = 0; i < 4; i++) {
           const nx = neighbors[i][0], ny = neighbors[i][1];
           if (nx >= startX && nx < endX && ny >= startY && ny < endY) {
@@ -278,7 +273,7 @@ function findFourCornersRobust(imgData, W, H) {
               visited[nVidx] = 1;
               const nIdx = nVidx * 4;
               const nLum = 0.299 * data[nIdx] + 0.587 * data[nIdx + 1] + 0.114 * data[nIdx + 2];
-              if (nLum < darkThreshold && tail < 4490) {
+              if (nLum < darkThreshold && tail < 2990) {
                 qX[tail] = nx; qY[tail] = ny; tail++;
               }
             }
@@ -286,36 +281,21 @@ function findFourCornersRobust(imgData, W, H) {
         }
       }
 
-      const bw = bMaxX - bMinX + 2;
-      const bh = bMaxY - bMinY + 2;
+      const bw = bMaxX - bMinX + 1;
+      const bh = bMaxY - bMinY + 1;
 
       if (bw >= minSize && bw <= maxSize && bh >= minSize && bh <= maxSize) {
         const aspect = bw / bh;
-        if (aspect >= 0.65 && aspect <= 1.55) {
-          const expected = (bw / 2) * (bh / 2);
-          const solidity = expected > 0 ? count / expected : 0;
-          // Fiducial squares are solid blocks (solidity >= 0.68)
-          if (solidity >= 0.68) {
-            const cx = sumX / count;
-            const cy = sumY / count;
-            const meanLum = sumLum / count;
-
-            const pad = 6;
-            const sx0 = Math.max(0, bMinX - pad), sx1 = Math.min(W - 1, bMaxX + pad);
-            const sy0 = Math.max(0, bMinY - pad), sy1 = Math.min(H - 1, bMaxY + pad);
-            let surrSum = 0, surrCnt = 0;
-            for (let py = sy0; py <= sy1; py += 2) {
-              for (let px = sx0; px <= sx1; px += 2) {
-                if (px >= bMinX - 1 && px <= bMaxX + 1 && py >= bMinY - 1 && py <= bMaxY + 1) continue;
-                const pIdx = (py * W + px) * 4;
-                surrSum += 0.299 * data[pIdx] + 0.587 * data[pIdx + 1] + 0.114 * data[pIdx + 2];
-                surrCnt++;
-              }
-            }
-            const surrMean = surrCnt > 0 ? surrSum / surrCnt : 0;
-            if (surrMean - meanLum >= 35 && surrMean > darkThreshold + 8) {
-              candidates.push({ x: cx, y: cy, bw, bh, solidity });
-            }
+        if (aspect >= 0.65 && aspect <= 1.50) {
+          const areaRatio = count / (bw * bh);
+          if (areaRatio >= 0.62) {
+            candidates.push({
+              x: sumX / count,
+              y: sumY / count,
+              bw,
+              bh,
+              size: (bw + bh) * 0.5
+            });
           }
         }
       }
@@ -324,36 +304,68 @@ function findFourCornersRobust(imgData, W, H) {
 
   if (candidates.length < 4) return null;
 
-  // Find extremal corners of the quadrilateral
-  let tl = null, tr = null, bl = null, br = null;
-  let minSum = Infinity, maxDiff = -Infinity, minDiff = Infinity, maxSum = -Infinity;
-
-  for (const c of candidates) {
-    const sum = c.x + c.y;
-    const diff = c.x - c.y;
-    if (sum < minSum) { minSum = sum; tl = c; }
-    if (diff > maxDiff) { maxDiff = diff; tr = c; }
-    if (diff < minDiff) { minDiff = diff; bl = c; }
-    if (sum > maxSum) { maxSum = sum; br = c; }
+  // Find pairs of top and bottom horizontal segments that form a valid rectangle
+  const horizPairs = [];
+  for (let i = 0; i < candidates.length; i++) {
+    for (let j = 0; j < candidates.length; j++) {
+      if (i === j) continue;
+      const left = candidates[i], right = candidates[j];
+      const dx = right.x - left.x;
+      const dy = Math.abs(right.y - left.y);
+      if (dx < W * 0.30) continue;
+      if (dy > dx * 0.20) continue;
+      if (Math.max(left.size, right.size) > Math.min(left.size, right.size) * 1.6) continue;
+      horizPairs.push({ left, right, width: Math.hypot(dx, dy) });
+    }
   }
 
-  if (!tl || !tr || !bl || !br) return null;
-  const unique = new Set([tl, tr, bl, br]);
-  if (unique.size < 4) return null;
+  let bestQuad = null;
+  let bestScore = -1;
 
-  const topWidth = Math.hypot(tr.x - tl.x, tr.y - tl.y);
-  const botWidth = Math.hypot(br.x - bl.x, br.y - bl.y);
-  const leftHeight = Math.hypot(bl.x - tl.x, bl.y - tl.y);
-  const rightHeight = Math.hypot(br.x - tr.x, br.y - tr.y);
+  for (let i = 0; i < horizPairs.length; i++) {
+    const topP = horizPairs[i];
+    for (let j = 0; j < horizPairs.length; j++) {
+      if (i === j) continue;
+      const botP = horizPairs[j];
 
-  // Ensure valid sheet size and opposite-side symmetry
-  if (topWidth < W * 0.35 || botWidth < W * 0.35 || leftHeight < H * 0.30 || rightHeight < H * 0.30) {
-    return null;
+      const lh = botP.left.y - topP.left.y;
+      const rh = botP.right.y - topP.right.y;
+      // Compare height to W (not H) so portrait 16:9 phones never reject half-sheets
+      if (lh < W * 0.22 || rh < W * 0.22) continue;
+
+      if (Math.abs(botP.left.x - topP.left.x) > lh * 0.20) continue;
+      if (Math.abs(botP.right.x - topP.right.x) > rh * 0.20) continue;
+
+      const wDiff = Math.abs(topP.width - botP.width) / Math.max(topP.width, botP.width);
+      const hDiff = Math.abs(lh - rh) / Math.max(lh, rh);
+      if (wDiff > 0.20 || hDiff > 0.20) continue;
+
+      const avgW = (topP.width + botP.width) * 0.5;
+      const avgH = (lh + rh) * 0.5;
+      const ratio = avgH / avgW;
+      if (ratio < 0.50 || ratio > 1.85) continue;
+
+      // Bonus if middle rail fiducials (f-ml, f-mr) lie on the left and right edges
+      let midRailBonus = 1.0;
+      const midLeftX = (topP.left.x + botP.left.x) * 0.5;
+      const midRightX = (topP.right.x + botP.right.x) * 0.5;
+      for (const c of candidates) {
+        if (c === topP.left || c === botP.left || c === topP.right || c === botP.right) continue;
+        if (c.y > topP.left.y + lh * 0.25 && c.y < botP.left.y - lh * 0.20) {
+          if (Math.abs(c.x - midLeftX) < 18) midRailBonus += 0.5;
+          if (Math.abs(c.x - midRightX) < 18) midRailBonus += 0.5;
+        }
+      }
+
+      const score = (avgW * avgH) * midRailBonus * (1.0 - wDiff) * (1.0 - hDiff);
+      if (score > bestScore) {
+        bestScore = score;
+        bestQuad = { tl: topP.left, tr: topP.right, bl: botP.left, br: botP.right };
+      }
+    }
   }
-  if (Math.abs(topWidth - botWidth) > Math.max(topWidth, botWidth) * 0.28) return null;
-  if (Math.abs(leftHeight - rightHeight) > Math.max(leftHeight, rightHeight) * 0.28) return null;
 
-  return { tl, tr, bl, br };
+  return bestQuad;
 }
 
 function warpPerspectiveToCanvas(srcImgData, corners, dstCtx, dstW, dstH, fiducialBottomY) {
@@ -446,15 +458,12 @@ async function decodeStudentQRMultiStage(videoElement, rawCanvas, warpedCanvas) 
   }
 
   if (typeof jsQR !== "undefined") {
-    // 1. Check the warped canvas QR box region first (high contrast, flat perspective)
     if (warpedCanvas) {
       const wCtx = warpedCanvas.getContext('2d');
       const fullWarped = wCtx.getImageData(0, 0, warpedCanvas.width, warpedCanvas.height);
-      let code = jsQR(fullWarped.data, warpedCanvas.width, warpedCanvas.height, { inversionAttempts: "attemptBoth" });
+      const code = jsQR(fullWarped.data, warpedCanvas.width, warpedCanvas.height, { inversionAttempts: "attemptBoth" });
       if (code && code.data) return cleanQrPayload(code.data);
     }
-
-    // 2. Fallback to raw camera canvas
     if (rawCanvas) {
       const probeW = Math.min(rawCanvas.width, 800);
       const probeH = Math.round(probeW * (rawCanvas.height / rawCanvas.width));
@@ -511,43 +520,12 @@ function drawValidationOverlays(ctx, itemBreakdown) {
   });
 }
 
-async function processCameraFrame() {
+async function processCameraFrame(preDetectedCorners = null, preProbeH = null) {
   stopAutoScanLoop();
 
   const video = document.getElementById('scanner-video');
   const displayCanvas = document.getElementById('scanner-canvas');
   if (!video.videoWidth) return alert("Camera is not ready yet.");
-
-  const probeCanvas = document.createElement('canvas');
-  probeCanvas.width = 640;
-  const probeH = Math.round(640 * (video.videoHeight / video.videoWidth));
-  probeCanvas.height = probeH;
-  const pCtx = probeCanvas.getContext('2d');
-  pCtx.drawImage(video, 0, 0, 640, probeH);
-  const probeImg = pCtx.getImageData(0, 0, 640, probeH);
-
-  const probeCorners = findFourCornersRobust(probeImg, 640, probeH);
-  if (!probeCorners) {
-    alert("Could not lock onto all 4 corner black squares. Hold the camera flat over the sheet and try again.");
-    resetToLiveCamera();
-    return;
-  }
-
-  const scaleX = video.videoWidth / 640;
-  const scaleY = video.videoHeight / probeH;
-  const corners = {
-    tl: { x: probeCorners.tl.x * scaleX, y: probeCorners.tl.y * scaleY },
-    tr: { x: probeCorners.tr.x * scaleX, y: probeCorners.tr.y * scaleY },
-    bl: { x: probeCorners.bl.x * scaleX, y: probeCorners.bl.y * scaleY },
-    br: { x: probeCorners.br.x * scaleX, y: probeCorners.br.y * scaleY }
-  };
-
-  const rawCanvas = document.createElement('canvas');
-  rawCanvas.width = video.videoWidth;
-  rawCanvas.height = video.videoHeight;
-  const rawCtx = rawCanvas.getContext('2d');
-  rawCtx.drawImage(video, 0, 0, rawCanvas.width, rawCanvas.height);
-  const rawImg = rawCtx.getImageData(0, 0, rawCanvas.width, rawCanvas.height);
 
   let keyItems = builderItems || [];
   if (keyItems.length === 0) {
@@ -564,21 +542,58 @@ async function processCameraFrame() {
     return;
   }
 
+  const probeH = preProbeH || Math.round(640 * (video.videoHeight / video.videoWidth));
+  let probeCorners = preDetectedCorners;
+
+  if (!probeCorners) {
+    const probeCanvas = document.createElement('canvas');
+    probeCanvas.width = 640;
+    probeCanvas.height = probeH;
+    const pCtx = probeCanvas.getContext('2d');
+    pCtx.drawImage(video, 0, 0, 640, probeH);
+    const probeImg = pCtx.getImageData(0, 0, 640, probeH);
+    probeCorners = findFourCornersRobust(probeImg, 640, probeH);
+  }
+
+  const rawCanvas = document.createElement('canvas');
+  rawCanvas.width = video.videoWidth;
+  rawCanvas.height = video.videoHeight;
+  const rawCtx = rawCanvas.getContext('2d');
+  rawCtx.drawImage(video, 0, 0, rawCanvas.width, rawCanvas.height);
+  const rawImg = rawCtx.getImageData(0, 0, rawCanvas.width, rawCanvas.height);
+
   const isForm100 = keyItems.length > 50;
   const CANON_W = 400;
   const FIDUCIAL_H = isForm100 ? 570 : 450;
-  // Add 12px bottom margin pad so bottom-most row (e.g. Item 15) is never clipped
   const CANON_H = isForm100 ? 580 : 462;
 
   displayCanvas.width = CANON_W;
   displayCanvas.height = CANON_H;
   const warpCtx = displayCanvas.getContext('2d');
 
-  warpPerspectiveToCanvas(rawImg, corners, warpCtx, CANON_W, CANON_H, FIDUCIAL_H);
-  cachedWarpedData = warpCtx.getImageData(0, 0, CANON_W, CANON_H);
+  if (probeCorners) {
+    // Client-side warp when corners are locked
+    const scaleX = video.videoWidth / 640;
+    const scaleY = video.videoHeight / probeH;
+    const corners = {
+      tl: { x: probeCorners.tl.x * scaleX, y: probeCorners.tl.y * scaleY },
+      tr: { x: probeCorners.tr.x * scaleX, y: probeCorners.tr.y * scaleY },
+      bl: { x: probeCorners.bl.x * scaleX, y: probeCorners.bl.y * scaleY },
+      br: { x: probeCorners.br.x * scaleX, y: probeCorners.br.y * scaleY }
+    };
+    warpPerspectiveToCanvas(rawImg, corners, warpCtx, CANON_W, CANON_H, FIDUCIAL_H);
+    cachedWarpedData = warpCtx.getImageData(0, 0, CANON_W, CANON_H);
+  } else {
+    // Fallback: Send scaled raw frame so Python OpenCV warps it on the server
+    const sendW = 800;
+    const sendH = Math.round(800 * (video.videoHeight / video.videoWidth));
+    displayCanvas.width = sendW;
+    displayCanvas.height = sendH;
+    warpCtx.drawImage(video, 0, 0, sendW, sendH);
+    cachedWarpedData = warpCtx.getImageData(0, 0, sendW, sendH);
+  }
 
-  // Decode QR from either raw frame or warped canvas
-  const qrResult = await decodeStudentQRMultiStage(video, rawCanvas, displayCanvas);
+  const qrResult = await decodeStudentQRMultiStage(video, rawCanvas, probeCorners ? displayCanvas : null);
   if (qrResult && qrResult.studentId) {
     matchAndDisplayStudent(qrResult.studentId, true);
   }
@@ -605,7 +620,7 @@ async function evaluateWarpedExam100(testSet, keyItems) {
   const warpCtx = displayCanvas.getContext('2d');
   warpCtx.putImageData(cachedWarpedData, 0, 0);
 
-  const base64Image = displayCanvas.toDataURL('image/jpeg', 0.92);
+  const base64Image = displayCanvas.toDataURL('image/jpeg', 0.90);
   let activeStudentId = document.getElementById('scan-detected-id').value.trim();
 
   document.getElementById('scan-grade-display').innerHTML = `<span class="spinner-border spinner-border-sm text-primary"></span> Grading with OpenCV...`;
@@ -628,13 +643,27 @@ async function evaluateWarpedExam100(testSet, keyItems) {
     return;
   }
 
-  // If backend OpenCV QR reader detected the student ID, apply it
   if (!activeStudentId && res.studentId) {
     activeStudentId = res.studentId;
     matchAndDisplayStudent(activeStudentId, true);
   }
 
-  // Draw Green/Red/Yellow validation rings on the warped canvas
+  // If server-side OpenCV warped a raw camera frame, load the server's warped image onto the canvas
+  if (res.warpedBase64) {
+    await new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        displayCanvas.width = img.width;
+        displayCanvas.height = img.height;
+        warpCtx.drawImage(img, 0, 0);
+        cachedWarpedData = warpCtx.getImageData(0, 0, img.width, img.height);
+        resolve();
+      };
+      img.onerror = resolve;
+      img.src = "data:image/jpeg;base64," + res.warpedBase64;
+    });
+  }
+
   drawValidationOverlays(warpCtx, res.itemBreakdown);
 
   document.getElementById('scan-score-display').innerText = `${res.rawScore} / ${res.totalPoints}`;
