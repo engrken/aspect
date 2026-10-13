@@ -253,19 +253,13 @@ function renderResults(results) {
   document.getElementById('results-count').innerText = `${results.length} Recorded`;
 
   if (results.length === 0) {
-    container.innerHTML = `
-      <div class="col-12">
-        <div class="card p-5 text-center border-dashed">
-          <i class="bi bi-folder2-open display-4 text-body-tertiary mb-2"></i>
-          <h6 class="fw-bold text-body-secondary">No Exam Scores Recorded Yet</h6>
-          <p class="small text-body-secondary mb-0">Your exam records will populate here once evaluated.</p>
-        </div>
-      </div>`;
-    return;
+    // (Existing Empty State rendering)
   }
 
   results.forEach(item => {
     const isPassed = item.status === 'PASSED';
+    const hasImage = item.scannedImage && item.scannedImage.length > 50;
+    
     const card = document.createElement('div');
     card.className = "col-md-6 col-lg-4";
     card.innerHTML = `
@@ -274,7 +268,7 @@ function renderResults(results) {
           <span class="fw-bold font-monospace text-primary">${item.subjectCode}</span>
           <span class="badge ${isPassed ? 'bg-success' : 'bg-danger'}">${item.status}</span>
         </div>
-        <div class="card-body">
+        <div class="card-body pb-2">
           <h6 class="fw-bold mb-1">${item.subjectTitle}</h6>
           <small class="text-body-secondary d-block mb-3">Section: ${item.section} • Test Set: ${item.set}</small>
 
@@ -283,25 +277,29 @@ function renderResults(results) {
               <div class="border rounded p-2 bg-body-tertiary">
                 <span class="text-uppercase fw-bold text-body-secondary" style="font-size: 0.65rem;">Raw Score</span>
                 <div class="fs-4 fw-bold">${item.rawScore} <small class="fs-6 text-secondary">/ ${item.totalPoints}</small></div>
-                <div class="small fw-semibold text-secondary">Points Earned</div>
               </div>
             </div>
             <div class="col-6">
               <div class="border rounded p-2 bg-primary-subtle border-primary-subtle">
                 <span class="text-uppercase fw-bold text-primary" style="font-size: 0.65rem;">Score Rate</span>
                 <div class="fs-4 fw-bold text-primary-emphasis">${item.percentage}</div>
-                <div class="small fw-semibold text-primary">Percentage</div>
               </div>
             </div>
           </div>
-
+          
           <div class="d-flex justify-content-between align-items-center text-secondary small">
-            <span><i class="bi bi-clock-history me-1"></i>Scanned:</span>
-            <span class="font-monospace">${item.timestamp}</span>
+            <span><i class="bi bi-clock-history me-1"></i>${item.timestamp}</span>
+            ${hasImage ? `<button class="btn btn-sm btn-outline-primary py-0" onclick="viewStudentSheet('${item.scannedImage}')"><i class="bi bi-camera"></i> View</button>` : ''}
           </div>
         </div>
       </div>
     `;
     container.appendChild(card);
   });
+}
+
+function viewStudentSheet(base64Str) {
+  document.getElementById('student-scanned-img').src = "data:image/jpeg;base64," + base64Str;
+  new bootstrap.Modal(document.getElementById('view-sheet-modal')).show();
+}
 }

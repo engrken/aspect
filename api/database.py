@@ -17,8 +17,6 @@ engine = create_engine(raw_db_url, connect_args=connect_args, pool_pre_ping=True
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# --- PASSWORD HASHING & SALTING UTILITIES (PBKDF2-HMAC-SHA256) ---
-
 def hash_password(password: str, iterations: int = 260000) -> str:
     salt = secrets.token_hex(16)
     dk = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), iterations)
@@ -35,15 +33,13 @@ def verify_password(password: str, stored_hash: str) -> bool:
     except Exception:
         return False
 
-# --- DATABASE MODELS ---
-
 class RosterUser(Base):
     __tablename__ = "roster"
     student_id = Column(String, primary_key=True, index=True)
     email = Column(String, default="")
     full_name = Column(String, nullable=False)
     section = Column(String, default="BS-ECE")
-    role = Column(String, default="STUDENT")  # TEACHER or STUDENT
+    role = Column(String, default="STUDENT")
     password_hash = Column(String, default="")
 
 class AuthSession(Base):
@@ -93,18 +89,18 @@ class Submission(Base):
     percentage = Column(Float)
     is_passed = Column(Boolean)
     answers = Column(JSON)
+    # NEW: Stores the warped Base64 JPEG for review
+    scanned_image = Column(String, default="")
 
 def ensure_seeded(db):
-    """Creates tables, removes any dummy students, and ensures only FACULTY-01 is seeded."""
     Base.metadata.create_all(bind=engine)
-
     try:
         db.execute(text("ALTER TABLE roster ADD COLUMN IF NOT EXISTS password_hash VARCHAR DEFAULT ''"))
+        db.execute(text("ALTER TABLE exam_submissions ADD COLUMN IF NOT EXISTS scanned_image TEXT DEFAULT ''"))
         db.commit()
     except Exception:
         db.rollback()
 
-    # Purge any previously seeded dummy students ("Examinee Student %")
     dummy_students = db.query(RosterUser).filter(RosterUser.full_name.like("Examinee Student %")).all()
     if dummy_students:
         for ds in dummy_students:
@@ -112,7 +108,6 @@ def ensure_seeded(db):
             db.delete(ds)
         db.commit()
 
-    # Ensure primary System Admin / Faculty account exists
     faculty = db.query(RosterUser).filter_by(student_id="FACULTY-01").first()
     if not faculty:
         db.add(RosterUser(

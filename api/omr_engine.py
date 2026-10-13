@@ -3,15 +3,20 @@ import cv2
 import numpy as np
 
 def decode_qr_opencv(gray_img):
-    """Attempts to decode the student QR code from the top-right meta box with super-resolution upscaling."""
+    """Attempts to decode the student QR code from the top-right meta box with CLAHE contrast enhancement and 3.0x upscaling."""
     try:
         detector = cv2.QRCodeDetector()
         h, w = gray_img.shape
-        qr_crop = gray_img[int(h * 0.04):int(h * 0.30), int(w * 0.65):w]
-        upscaled = cv2.resize(qr_crop, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
+        qr_crop = gray_img[int(h * 0.04):int(h * 0.32), int(w * 0.60):w]
+        
+        # Apply Adaptive Histogram Equalization to fix lighting issues
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8,8))
+        enhanced = clahe.apply(qr_crop)
+        
+        upscaled = cv2.resize(enhanced, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_CUBIC)
         _, thresh_qr = cv2.threshold(upscaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-        for candidate in [qr_crop, upscaled, thresh_qr, gray_img]:
+        for candidate in [upscaled, thresh_qr, enhanced, qr_crop, gray_img]:
             data, _, _ = detector.detectAndDecode(candidate)
             if data:
                 cleaned = data.strip()
@@ -24,11 +29,6 @@ def decode_qr_opencv(gray_img):
     return None
 
 def auto_warp_sheet_opencv(gray_img, is_form_100=False):
-    """
-    If the image is already warped to canonical size (400x450 or 400x570), returns it directly.
-    Otherwise locates the 4 outer corner fiducial squares and maps their centers to
-    (12, 12), (388, 12), (388, H-12), (12, H-12) to match the SVG viewBox 1-to-1.
-    """
     H, W = gray_img.shape
     canon_w = 400
     canon_h = 570 if is_form_100 else 450
@@ -61,10 +61,10 @@ def auto_warp_sheet_opencv(gray_img, is_form_100=False):
                         cx, cy = centroids[i]
                         candidates.append({'x': float(cx), 'y': float(cy)})
 
-        tl_list = [c for c in candidates if c['x'] < W * 0.38 and c['y'] < H * 0.38]
-        tr_list = [c for c in candidates if c['x'] > W * 0.62 and c['y'] < H * 0.38]
-        bl_list = [c for c in candidates if c['x'] < W * 0.38 and c['y'] > H * 0.62]
-        br_list = [c for c in candidates if c['x'] > W * 0.62 and c['y'] > H * 0.62]
+        tl_list = [c for c in candidates if c['x'] < W * 0.35 and c['y'] < H * 0.35]
+        tr_list = [c for c in candidates if c['x'] > W * 0.65 and c['y'] < H * 0.35]
+        bl_list = [c for c in candidates if c['x'] < W * 0.35 and c['y'] > H * 0.65]
+        br_list = [c for c in candidates if c['x'] > W * 0.65 and c['y'] > H * 0.65]
 
         if tl_list and tr_list and bl_list and br_list:
             tl = min(tl_list, key=lambda c: c['x'] + c['y'])
@@ -77,7 +77,7 @@ def auto_warp_sheet_opencv(gray_img, is_form_100=False):
             left_h = float(np.hypot(bl['x'] - tl['x'], bl['y'] - tl['y']))
             right_h = float(np.hypot(br['x'] - tr['x'], br['y'] - tr['y']))
 
-            if top_w > W * 0.45 and bot_w > W * 0.45 and left_h > W * 0.40 and right_h > W * 0.40:
+            if top_w > W * 0.50 and bot_w > W * 0.50 and left_h > H * 0.45 and right_h > H * 0.45:
                 if abs(top_w - bot_w) / max(top_w, bot_w) <= 0.20 and abs(left_h - right_h) / max(left_h, right_h) <= 0.20:
                     best_quad = (tl, tr, br, bl)
                     break
@@ -91,10 +91,10 @@ def auto_warp_sheet_opencv(gray_img, is_form_100=False):
             [bl['x'], bl['y']]
         ], dtype=np.float32)
         dst_pts = np.array([
-            [12.0, 12.0],
-            [canon_w - 12.0, 12.0],
-            [canon_w - 12.0, canon_h - 12.0],
-            [12.0, canon_h - 12.0]
+            [0, 0],
+            [canon_w, 0],
+            [canon_w, canon_h],
+            [0, canon_h]
         ], dtype=np.float32)
         M = cv2.getPerspectiveTransform(src_pts, dst_pts)
         warped = cv2.warpPerspective(gray_img, M, (canon_w, canon_h), borderValue=255)
@@ -107,7 +107,6 @@ def auto_warp_sheet_opencv(gray_img, is_form_100=False):
     return resized, base64.b64encode(buf).decode('utf-8')
 
 def detect_shaded_test_set(blurred_img, default_set='A'):
-    """Checks the Set A (92, 103) and Set B (148, 103) bubbles in the SVG meta box."""
     try:
         roi_a = blurred_img[98:109, 87:98]
         roi_b = blurred_img[98:109, 143:154]
@@ -128,7 +127,6 @@ def grade_sheet_opencv(image_bytes, items, test_set):
         raise ValueError("Could not decode image bytes.")
 
     detected_qr_id = decode_qr_opencv(raw_img)
-
     total_items = len(items)
     is_form_100 = total_items > 50
 
@@ -144,7 +142,6 @@ def grade_sheet_opencv(image_bytes, items, test_set):
 
     item_coords = {}
     if is_form_100:
-        # Exact SVG viewBox="0 0 400 570" coordinates (works for 51..100 items on any paper size)
         col_xs = [
             [46.0, 58.0, 70.0, 82.0],
             [138.0, 150.0, 162.0, 174.0],
@@ -158,7 +155,6 @@ def grade_sheet_opencv(image_bytes, items, test_set):
                 item_coords[c * 25 + r + 1] = (col_xs[c], int(round(row_start_y + r * row_pitch)))
         box_r = 5
     else:
-        # Exact SVG viewBox="0 0 400 450" coordinates (works for 1..50 items on any paper size)
         col_xs = [
             [56.0, 72.0, 88.0, 104.0],
             [180.0, 196.0, 212.0, 228.0],

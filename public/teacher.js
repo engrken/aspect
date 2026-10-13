@@ -557,16 +557,18 @@ async function saveExamBuilder() {
 
 // --- SUBMISSIONS LEDGER ---
 
+let currentSubmissions = [];
+
 async function loadSubmissionsLedger() {
   if (!activeClassId) return;
   const tbody = document.getElementById('submissions-table-body');
-  tbody.innerHTML = '<tr><td colspan="7" class="text-center py-4 text-body-secondary">Loading records...</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="8" class="text-center py-4 text-body-secondary">Loading records...</td></tr>';
 
   const res = await callApi({ action: 'GET_SUBMISSIONS', sessionToken, classId: activeClassId });
   tbody.innerHTML = '';
 
   if (!res.success || !res.submissions || res.submissions.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="text-center py-4 text-body-secondary">No scanned exam records found.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="text-center py-4 text-body-secondary">No scanned exam records found.</td></tr>';
     document.getElementById('kpi-total').innerText = '0';
     document.getElementById('kpi-mean').innerText = '0.00';
     document.getElementById('kpi-pass-rate').innerText = '0%';
@@ -574,10 +576,10 @@ async function loadSubmissionsLedger() {
     return;
   }
 
-  const subs = res.submissions;
+  currentSubmissions = res.submissions;
   let totalScore = 0, passedCount = 0, minScore = 9999, maxScore = -1;
 
-  subs.forEach(s => {
+  currentSubmissions.forEach(s => {
     totalScore += s.rawScore;
     if (s.isPassed) passedCount++;
     if (s.rawScore < minScore) minScore = s.rawScore;
@@ -592,9 +594,79 @@ async function loadSubmissionsLedger() {
       <td class="fw-bold">${s.percentage}</td>
       <td><span class="badge ${s.isPassed ? 'bg-success' : 'bg-danger'}">${s.isPassed ? 'PASSED' : 'FAILED'}</span></td>
       <td class="small text-body-secondary">${s.timestamp}</td>
+      <td class="text-center">
+        <button class="btn btn-sm btn-outline-primary" onclick="openReviewModal(${s.id})"><i class="bi bi-eye"></i> View</button>
+      </td>
     `;
     tbody.appendChild(tr);
   });
+
+  document.getElementById('kpi-total').innerText = currentSubmissions.length;
+  document.getElementById('kpi-mean').innerText = (totalScore / currentSubmissions.length).toFixed(2);
+  document.getElementById('kpi-pass-rate').innerText = `${Math.round((passedCount / currentSubmissions.length) * 100)}%`;
+  document.getElementById('kpi-range').innerText = `${minScore === 9999 ? 0 : minScore} - ${maxScore === -1 ? 0 : maxScore}`;
+}
+
+function openReviewModal(subId) {
+  const sub = currentSubmissions.find(s => s.id === subId);
+  if (!sub) return;
+  
+  document.getElementById('review-sub-id').value = sub.id;
+  document.getElementById('review-student-name').innerText = sub.fullName;
+  document.getElementById('review-student-meta').innerText = `ID: ${sub.studentId} | Test Set: ${sub.testSet}`;
+  document.getElementById('review-raw-score').value = sub.rawScore;
+  document.getElementById('review-total-points').value = sub.totalPoints;
+  document.getElementById('review-answers-json').value = JSON.stringify(sub.answers || {}, null, 2);
+  
+  const activeClassObj = classList.find(cls => cls.classId === activeClassId);
+  document.getElementById('review-class-pass-pct').value = activeClassObj ? activeClassObj.passingPercentage : 70;
+
+  const imgEl = document.getElementById('review-image');
+  if (sub.scannedImage) {
+    imgEl.src = "data:image/jpeg;base64," + sub.scannedImage;
+  } else {
+    imgEl.src = "";
+  }
+
+  new bootstrap.Modal(document.getElementById('review-modal')).show();
+}
+
+async function handleUpdateScore(e) {
+  e.preventDefault();
+  const subId = document.getElementById('review-sub-id').value;
+  const rawScore = parseInt(document.getElementById('review-raw-score').value, 10);
+  const totalPoints = parseInt(document.getElementById('review-total-points').value, 10);
+  const passPct = parseInt(document.getElementById('review-class-pass-pct').value, 10) || 70;
+  
+  let answers = null;
+  try {
+    answers = JSON.parse(document.getElementById('review-answers-json').value);
+  } catch (err) {
+    alert("Invalid JSON format in the answers box.");
+    return;
+  }
+
+  const percentage = totalPoints > 0 ? Math.round((rawScore / totalPoints) * 10000) / 100 : 0;
+  const isPassed = percentage >= passPct;
+
+  const res = await callApi({
+    action: 'UPDATE_SUBMISSION',
+    sessionToken,
+    submissionId: subId,
+    rawScore,
+    percentage,
+    isPassed,
+    answers
+  });
+
+  if (res.success) {
+    bootstrap.Modal.getInstance(document.getElementById('review-modal')).hide();
+    await loadSubmissionsLedger();
+    alert("Grade successfully updated.");
+  } else {
+    alert("Error updating score: " + res.message);
+  }
+}
 
   document.getElementById('kpi-total').innerText = subs.length;
   document.getElementById('kpi-mean').innerText = (totalScore / subs.length).toFixed(2);

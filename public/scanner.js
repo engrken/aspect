@@ -717,7 +717,8 @@ async function submitScannedResult() {
       studentId: studentId,
       testSet: lastScannedData.testSet,
       answers: lastScannedData.answers,
-      items: builderItems
+      items: builderItems,
+      warpedBase64: lastScannedData.warpedBase64
     });
 
     btn.disabled = false;
