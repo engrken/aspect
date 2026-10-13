@@ -411,7 +411,7 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                 db_items = db.query(ExamItem).filter_by(class_id=payload.classId).order_by(ExamItem.item_no.asc()).all()
                 items = [{"itemNo": i.item_no, "type": i.type, "points": i.points, "setA": i.set_a, "setB": i.set_b} for i in db_items]
 
-            detected_answers, raw_score, total_points, breakdown = grade_sheet_opencv(
+            detected_answers, raw_score, total_points, breakdown, detected_qr_id = grade_sheet_opencv(
                 img_bytes, items, payload.testSet
             )
 
@@ -422,6 +422,7 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
 
             return {
                 "success": True,
+                "studentId": payload.studentId or detected_qr_id or "",
                 "answers": detected_answers,
                 "rawScore": raw_score,
                 "totalPoints": total_points,

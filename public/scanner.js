@@ -1,6 +1,6 @@
 /**
  * ASPECT Engine — Optical Mark Recognition & Vision Pipeline
- * Backed by Python/FastAPI OpenCV Serverless Engine
+ * Calibrated for 1-50 Item Half-Sheets & 51-100 Item Full Sheets
  */
 
 let videoStream = null;
@@ -13,14 +13,14 @@ let isScanningFrame = false;
 let stableAlignmentCount = 0;
 const REQUIRED_STABLE_FRAMES = 2;
 
-const nativeBarcodeDetector = ('BarcodeDetector' in window) 
-  ? new BarcodeDetector({ formats: ['qr_code'] }) 
+const nativeBarcodeDetector = ('BarcodeDetector' in window)
+  ? new BarcodeDetector({ formats: ['qr_code'] })
   : null;
 
 function populateStudentSelect() {
   const sel = document.getElementById('scan-student-select');
   if (!sel) return;
-  sel.innerHTML = '<option value="">Roster Selector...</option>' + 
+  sel.innerHTML = '<option value="">Roster Selector...</option>' +
     enrolledStudentsList.map(s => `<option value="${s.studentId}">${s.fullName} (${s.studentId})</option>`).join('');
 }
 
@@ -59,13 +59,13 @@ function matchAndDisplayStudent(studentId, isQrVerified) {
     if (card) card.className = 'p-2 mb-2 rounded border border-warning-subtle bg-warning-subtle d-flex align-items-center gap-2';
     if (avatar) { avatar.className = 'rounded-circle bg-warning text-dark fw-bold d-flex align-items-center justify-content-center flex-shrink-0'; avatar.innerText = 'ID'; }
     if (nameEl) nameEl.innerText = `Student ID: ${studentId}`;
-    if (metaEl) metaEl.innerText = 'Unlisted in current section roster';
-    if (badge) { badge.className = 'badge bg-warning text-dark'; badge.innerText = isQrVerified ? 'QR DETECTED' : 'UNLISTED'; }
+    if (metaEl) metaEl.innerText = 'Auto-detected from sheet (unlisted in section)';
+    if (badge) { badge.className = 'badge bg-warning text-dark'; badge.innerText = isQrVerified ? 'QR DETECTED' : 'ID SET'; }
   }
 
   document.getElementById('scan-detected-id').value = studentId;
   const sel = document.getElementById('scan-student-select');
-  if (sel) sel.value = studentId;
+  if (sel && st) sel.value = st.studentId;
 
   if (lastScannedData) {
     lastScannedData.studentId = studentId;
@@ -126,7 +126,6 @@ function resetToLiveCamera() {
 
   lastScannedData = null;
   cachedWarpedData = null;
-  matchAndDisplayStudent('', false);
   updateTargetUI(false);
   startAutoScanLoop();
 }
@@ -137,15 +136,15 @@ function updateTargetUI(isLocked) {
   const label = document.getElementById('align-instruction');
   const color = isLocked ? '#198754' : '#0d6efd';
 
-  if (frame) frame.style.borderColor = isLocked ? 'rgba(25, 135, 84, 0.8)' : 'rgba(255,255,255,0.35)';
+  if (frame) frame.style.borderColor = isLocked ? 'rgba(25, 135, 84, 0.85)' : 'rgba(255,255,255,0.35)';
   brackets.forEach(b => b.style.borderColor = color);
 
   if (label) {
     if (isLocked) {
-      label.innerText = `Aligned! Hold steady (${stableAlignmentCount}/${REQUIRED_STABLE_FRAMES})...`;
+      label.innerText = `Corners Locked! Hold steady (${stableAlignmentCount}/${REQUIRED_STABLE_FRAMES})...`;
       label.style.color = '#20c997';
     } else {
-      label.innerText = "Point camera at the answer sheet";
+      label.innerText = "Align the 4 corner black squares inside the frame";
       label.style.color = '#ffffff';
     }
   }
@@ -168,7 +167,7 @@ function startAutoScanLoop() {
 
     probeCtx.drawImage(video, 0, 0, 640, probeH);
     const probeImg = probeCtx.getImageData(0, 0, 640, probeH);
-    
+
     const corners = findFourCornersRobust(probeImg, 640, probeH);
 
     if (corners) {
@@ -181,7 +180,7 @@ function startAutoScanLoop() {
         try {
           await processCameraFrame();
         } catch (err) {
-          console.error("Auto-scan execution error:", err);
+          console.error("Auto-scan error:", err);
           resetToLiveCamera();
         } finally {
           isScanningFrame = false;
@@ -191,7 +190,7 @@ function startAutoScanLoop() {
       stableAlignmentCount = 0;
       updateTargetUI(false);
     }
-  }, 140);
+  }, 150);
 }
 
 function stopAutoScanLoop() {
@@ -201,146 +200,171 @@ function stopAutoScanLoop() {
   }
 }
 
+/**
+ * Quad-Extremal Fiducial Detector
+ * Eliminates 2x2 parity duplicates, rejects keyboard/text noise, and finds true sheet corners.
+ */
 function findFourCornersRobust(imgData, W, H) {
   const data = imgData.data;
-  
+
+  // Sample luminance inside central 85% of frame to ignore dark bezels
   let minLum = 255, maxLum = 0;
-  for (let y = 0; y < H; y += 8) {
-    for (let x = 0; x < W; x += 8) {
+  const marginX = Math.floor(W * 0.06);
+  const marginY = Math.floor(H * 0.06);
+  for (let y = marginY; y < H - marginY; y += 8) {
+    for (let x = marginX; x < W - marginX; x += 8) {
       const idx = (y * W + x) * 4;
-      const lum = 0.299 * data[idx] + 0.587 * data[idx+1] + 0.114 * data[idx+2];
+      const lum = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
       if (lum < minLum) minLum = lum;
       if (lum > maxLum) maxLum = lum;
     }
   }
-  
-  if (maxLum - minLum < 40) return null;
-  const darkThreshold = minLum + (maxLum - minLum) * 0.40;
-  
+
+  if (maxLum - minLum < 35) return null;
+  const darkThreshold = minLum + (maxLum - minLum) * 0.42;
+
   const visited = new Uint8Array(W * H);
   const candidates = [];
   const minDim = Math.min(W, H);
-  const minSize = Math.max(4, Math.floor(minDim * 0.008));
-  const maxSize = Math.max(30, Math.floor(minDim * 0.080));
-  
-  const qX = new Int32Array(6000);
-  const qY = new Int32Array(6000);
-  
-  for (let sy = 0; sy < H; sy += 3) {
-    for (let sx = 0; sx < W; sx += 3) {
+  const minSize = Math.max(9, Math.floor(minDim * 0.014));
+  const maxSize = Math.max(36, Math.floor(minDim * 0.075));
+
+  const qX = new Int32Array(4500);
+  const qY = new Int32Array(4500);
+
+  // Step by 2 on even coordinates so 2-pixel BFS stays on an exact lattice (zero duplicates)
+  const startY = Math.floor(H * 0.04) & ~1;
+  const endY = H - startY;
+  const startX = Math.floor(W * 0.04) & ~1;
+  const endX = W - startX;
+
+  for (let sy = startY; sy < endY; sy += 2) {
+    for (let sx = startX; sx < endX; sx += 2) {
       const vIdx = sy * W + sx;
       if (visited[vIdx]) continue;
-      
-      const idx = (sy * W + sx) * 4;
-      const lum = 0.299 * data[idx] + 0.587 * data[idx+1] + 0.114 * data[idx+2];
-      
+
+      const idx = vIdx * 4;
+      const lum = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
       if (lum >= darkThreshold) {
         visited[vIdx] = 1;
         continue;
       }
-      
+
       let head = 0, tail = 0;
       qX[tail] = sx; qY[tail] = sy; tail++;
       visited[vIdx] = 1;
-      
+
       let bMinX = sx, bMaxX = sx, bMinY = sy, bMaxY = sy;
-      let sumX = 0, sumY = 0, count = 0;
-      
+      let sumX = 0, sumY = 0, sumLum = 0, count = 0;
+
       while (head < tail) {
         const cx = qX[head], cy = qY[head];
-        head++; count++; sumX += cx; sumY += cy;
-        
+        head++; count++;
+        sumX += cx; sumY += cy;
+        const cIdx = (cy * W + cx) * 4;
+        sumLum += 0.299 * data[cIdx] + 0.587 * data[cIdx + 1] + 0.114 * data[cIdx + 2];
+
         if (cx < bMinX) bMinX = cx;
         if (cx > bMaxX) bMaxX = cx;
         if (cy < bMinY) bMinY = cy;
         if (cy > bMaxY) bMaxY = cy;
-        
-        const neighbors = [[cx+2, cy], [cx-2, cy], [cx, cy+2], [cx, cy-2]];
+
+        const neighbors = [[cx + 2, cy], [cx - 2, cy], [cx, cy + 2], [cx, cy - 2]];
         for (let i = 0; i < 4; i++) {
           const nx = neighbors[i][0], ny = neighbors[i][1];
-          if (nx >= 0 && nx < W && ny >= 0 && ny < H) {
+          if (nx >= startX && nx < endX && ny >= startY && ny < endY) {
             const nVidx = ny * W + nx;
             if (!visited[nVidx]) {
               visited[nVidx] = 1;
-              const nIdx = (ny * W + nx) * 4;
-              const nLum = 0.299 * data[nIdx] + 0.587 * data[nIdx+1] + 0.114 * data[nIdx+2];
-              if (nLum < darkThreshold && tail < 5990) {
+              const nIdx = nVidx * 4;
+              const nLum = 0.299 * data[nIdx] + 0.587 * data[nIdx + 1] + 0.114 * data[nIdx + 2];
+              if (nLum < darkThreshold && tail < 4490) {
                 qX[tail] = nx; qY[tail] = ny; tail++;
               }
             }
           }
         }
       }
-      
-      const bw = bMaxX - bMinX + 1;
-      const bh = bMaxY - bMinY + 1;
-      
+
+      const bw = bMaxX - bMinX + 2;
+      const bh = bMaxY - bMinY + 2;
+
       if (bw >= minSize && bw <= maxSize && bh >= minSize && bh <= maxSize) {
         const aspect = bw / bh;
-        if (aspect >= 0.55 && aspect <= 1.8) {
+        if (aspect >= 0.65 && aspect <= 1.55) {
           const expected = (bw / 2) * (bh / 2);
           const solidity = expected > 0 ? count / expected : 0;
-          if (solidity >= 0.35) {
+          // Fiducial squares are solid blocks (solidity >= 0.68)
+          if (solidity >= 0.68) {
             const cx = sumX / count;
             const cy = sumY / count;
-            
-            const pad = 4;
-            let sx0 = Math.max(0, bMinX - pad), sx1 = Math.min(W - 1, bMaxX + pad);
-            let sy0 = Math.max(0, bMinY - pad), sy1 = Math.min(H - 1, bMaxY + pad);
+            const meanLum = sumLum / count;
+
+            const pad = 6;
+            const sx0 = Math.max(0, bMinX - pad), sx1 = Math.min(W - 1, bMaxX + pad);
+            const sy0 = Math.max(0, bMinY - pad), sy1 = Math.min(H - 1, bMaxY + pad);
             let surrSum = 0, surrCnt = 0;
             for (let py = sy0; py <= sy1; py += 2) {
               for (let px = sx0; px <= sx1; px += 2) {
-                 if (px >= bMinX && px <= bMaxX && py >= bMinY && py <= bMaxY) continue;
-                 const pIdx = (py * W + px) * 4;
-                 surrSum += 0.299 * data[pIdx] + 0.587 * data[pIdx+1] + 0.114 * data[pIdx+2];
-                 surrCnt++;
+                if (px >= bMinX - 1 && px <= bMaxX + 1 && py >= bMinY - 1 && py <= bMaxY + 1) continue;
+                const pIdx = (py * W + px) * 4;
+                surrSum += 0.299 * data[pIdx] + 0.587 * data[pIdx + 1] + 0.114 * data[pIdx + 2];
+                surrCnt++;
               }
             }
-            const surrMean = surrCnt > 0 ? surrSum / surrCnt : 255;
-            if (surrMean > darkThreshold + 20) {
-              candidates.push({ x: cx, y: cy });
+            const surrMean = surrCnt > 0 ? surrSum / surrCnt : 0;
+            if (surrMean - meanLum >= 35 && surrMean > darkThreshold + 8) {
+              candidates.push({ x: cx, y: cy, bw, bh, solidity });
             }
           }
         }
       }
     }
   }
-  
+
   if (candidates.length < 4) return null;
-  
-  candidates.sort((a, b) => a.y - b.y);
-  
-  const tops = candidates.slice(0, Math.min(3, Math.ceil(candidates.length / 2)));
-  const bots = candidates.slice(-Math.min(3, Math.ceil(candidates.length / 2)));
-  
-  tops.sort((a, b) => a.x - b.x);
-  bots.sort((a, b) => a.x - b.x);
-  
-  const tl = tops[0];
-  const tr = tops[tops.length - 1];
-  const bl = bots[0];
-  const br = bots[bots.length - 1];
-  
-  const topWidth = tr.x - tl.x;
-  const botWidth = br.x - bl.x;
-  const leftHeight = bl.y - tl.y;
-  const rightHeight = br.y - tr.y;
-  
-  if (topWidth < W * 0.35 || botWidth < W * 0.35 || leftHeight < H * 0.35 || rightHeight < H * 0.35) {
+
+  // Find extremal corners of the quadrilateral
+  let tl = null, tr = null, bl = null, br = null;
+  let minSum = Infinity, maxDiff = -Infinity, minDiff = Infinity, maxSum = -Infinity;
+
+  for (const c of candidates) {
+    const sum = c.x + c.y;
+    const diff = c.x - c.y;
+    if (sum < minSum) { minSum = sum; tl = c; }
+    if (diff > maxDiff) { maxDiff = diff; tr = c; }
+    if (diff < minDiff) { minDiff = diff; bl = c; }
+    if (sum > maxSum) { maxSum = sum; br = c; }
+  }
+
+  if (!tl || !tr || !bl || !br) return null;
+  const unique = new Set([tl, tr, bl, br]);
+  if (unique.size < 4) return null;
+
+  const topWidth = Math.hypot(tr.x - tl.x, tr.y - tl.y);
+  const botWidth = Math.hypot(br.x - bl.x, br.y - bl.y);
+  const leftHeight = Math.hypot(bl.x - tl.x, bl.y - tl.y);
+  const rightHeight = Math.hypot(br.x - tr.x, br.y - tr.y);
+
+  // Ensure valid sheet size and opposite-side symmetry
+  if (topWidth < W * 0.35 || botWidth < W * 0.35 || leftHeight < H * 0.30 || rightHeight < H * 0.30) {
     return null;
   }
-  
+  if (Math.abs(topWidth - botWidth) > Math.max(topWidth, botWidth) * 0.28) return null;
+  if (Math.abs(leftHeight - rightHeight) > Math.max(leftHeight, rightHeight) * 0.28) return null;
+
   return { tl, tr, bl, br };
 }
 
-function warpPerspectiveToCanvas(srcImgData, corners, dstCtx, dstW, dstH) {
+function warpPerspectiveToCanvas(srcImgData, corners, dstCtx, dstW, dstH, fiducialBottomY) {
   const src = [
     corners.tl.x, corners.tl.y,
     corners.tr.x, corners.tr.y,
     corners.br.x, corners.br.y,
     corners.bl.x, corners.bl.y
   ];
-  const dst = [0, 0, dstW, 0, dstW, dstH, 0, dstH];
+  const botY = fiducialBottomY || dstH;
+  const dst = [0, 0, dstW, 0, dstW, botY, 0, botY];
   const H_inv = getPerspectiveTransform(dst, src);
 
   const dstImgData = dstCtx.createImageData(dstW, dstH);
@@ -413,7 +437,7 @@ function getPerspectiveTransform(src, dst) {
   return h;
 }
 
-async function decodeStudentQRMultiStage(videoElement, rawCanvas) {
+async function decodeStudentQRMultiStage(videoElement, rawCanvas, warpedCanvas) {
   if (nativeBarcodeDetector) {
     try {
       const barcodes = await nativeBarcodeDetector.detect(videoElement);
@@ -421,22 +445,28 @@ async function decodeStudentQRMultiStage(videoElement, rawCanvas) {
     } catch (e) {}
   }
 
-  if (typeof jsQR !== "undefined" && rawCanvas) {
-    const probeW = Math.min(rawCanvas.width, 800);
-    const probeH = Math.round(probeW * (rawCanvas.height / rawCanvas.width));
-    const pCanvas = document.createElement('canvas');
-    pCanvas.width = probeW; pCanvas.height = probeH;
-    const pCtx = pCanvas.getContext('2d');
-    pCtx.drawImage(rawCanvas, 0, 0, probeW, probeH);
+  if (typeof jsQR !== "undefined") {
+    // 1. Check the warped canvas QR box region first (high contrast, flat perspective)
+    if (warpedCanvas) {
+      const wCtx = warpedCanvas.getContext('2d');
+      const fullWarped = wCtx.getImageData(0, 0, warpedCanvas.width, warpedCanvas.height);
+      let code = jsQR(fullWarped.data, warpedCanvas.width, warpedCanvas.height, { inversionAttempts: "attemptBoth" });
+      if (code && code.data) return cleanQrPayload(code.data);
+    }
 
-    let imgData = pCtx.getImageData(0, 0, probeW, probeH);
-    let code = jsQR(imgData.data, probeW, probeH, { inversionAttempts: "attemptBoth" });
-    if (code && code.data) return cleanQrPayload(code.data);
+    // 2. Fallback to raw camera canvas
+    if (rawCanvas) {
+      const probeW = Math.min(rawCanvas.width, 800);
+      const probeH = Math.round(probeW * (rawCanvas.height / rawCanvas.width));
+      const pCanvas = document.createElement('canvas');
+      pCanvas.width = probeW; pCanvas.height = probeH;
+      const pCtx = pCanvas.getContext('2d');
+      pCtx.drawImage(rawCanvas, 0, 0, probeW, probeH);
 
-    const headerH = Math.round(probeH * 0.40);
-    const headerData = pCtx.getImageData(0, 0, probeW, headerH);
-    code = jsQR(headerData.data, probeW, headerH, { inversionAttempts: "attemptBoth" });
-    if (code && code.data) return cleanQrPayload(code.data);
+      const imgData = pCtx.getImageData(0, 0, probeW, probeH);
+      const code = jsQR(imgData.data, probeW, probeH, { inversionAttempts: "attemptBoth" });
+      if (code && code.data) return cleanQrPayload(code.data);
+    }
   }
   return null;
 }
@@ -449,6 +479,36 @@ function cleanQrPayload(raw) {
     return { studentId: (parts[2] || parts[1] || "").trim(), formType: (parts[3] || "F50").trim() };
   }
   return { studentId: cleaned, formType: 'UNKNOWN' };
+}
+
+function drawValidationOverlays(ctx, itemBreakdown) {
+  if (!itemBreakdown || !Array.isArray(itemBreakdown)) return;
+  itemBreakdown.forEach(ib => {
+    if (!ib.bubbles) return;
+    ib.bubbles.forEach(b => {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r || 5.5, 0, 2 * Math.PI);
+      if (b.state === 'correct') {
+        ctx.strokeStyle = '#28a745';
+        ctx.fillStyle = 'rgba(40, 167, 69, 0.28)';
+        ctx.lineWidth = 2.0;
+        ctx.fill();
+        ctx.stroke();
+      } else if (b.state === 'wrong') {
+        ctx.strokeStyle = '#dc3545';
+        ctx.fillStyle = 'rgba(220, 53, 69, 0.28)';
+        ctx.lineWidth = 2.0;
+        ctx.fill();
+        ctx.stroke();
+      } else if (b.state === 'missed') {
+        ctx.strokeStyle = '#ffc107';
+        ctx.lineWidth = 1.8;
+        ctx.stroke();
+      }
+      ctx.restore();
+    });
+  });
 }
 
 async function processCameraFrame() {
@@ -468,7 +528,7 @@ async function processCameraFrame() {
 
   const probeCorners = findFourCornersRobust(probeImg, 640, probeH);
   if (!probeCorners) {
-    alert("Please completely center the four corner registration squares inside the viewfinder.");
+    alert("Could not lock onto all 4 corner black squares. Hold the camera flat over the sheet and try again.");
     resetToLiveCamera();
     return;
   }
@@ -489,37 +549,13 @@ async function processCameraFrame() {
   rawCtx.drawImage(video, 0, 0, rawCanvas.width, rawCanvas.height);
   const rawImg = rawCtx.getImageData(0, 0, rawCanvas.width, rawCanvas.height);
 
-  const qrResult = await decodeStudentQRMultiStage(video, rawCanvas);
-  let detectedStudentId = "";
-  let isForm100 = false;
-
-  if (qrResult) {
-    detectedStudentId = qrResult.studentId;
-    if (qrResult.formType && qrResult.formType.startsWith('F100')) isForm100 = true;
-    matchAndDisplayStudent(detectedStudentId, true);
-  }
-
   let keyItems = builderItems || [];
-  const detectedWidth = Math.hypot(probeCorners.tr.x - probeCorners.tl.x, probeCorners.tr.y - probeCorners.tl.y);
-  const detectedHeight = Math.hypot(probeCorners.bl.x - probeCorners.tl.x, probeCorners.bl.y - probeCorners.tl.y);
-  const detectedRatio = detectedHeight / (detectedWidth || 1);
-  
-  if (!isForm100 && (detectedRatio > 1.30 || keyItems.length > 50)) {
-    isForm100 = true;
-  }
-
-  const CANON_W = 400;
-  const CANON_H = isForm100 ? 570 : 450;
-  displayCanvas.width = CANON_W;
-  displayCanvas.height = CANON_H;
-  const warpCtx = displayCanvas.getContext('2d');
-
-  warpPerspectiveToCanvas(rawImg, corners, warpCtx, CANON_W, CANON_H);
-  cachedWarpedData = warpCtx.getImageData(0, 0, CANON_W, CANON_H);
-
   if (keyItems.length === 0) {
     const res = await callApi({ action: 'GET_FULL_EXAM_CONFIG', sessionToken, classId: activeClassId });
-    if (res.success && res.items) keyItems = res.items;
+    if (res.success && res.items) {
+      keyItems = res.items;
+      builderItems = res.items;
+    }
   }
 
   if (keyItems.length === 0) {
@@ -528,14 +564,33 @@ async function processCameraFrame() {
     return;
   }
 
+  const isForm100 = keyItems.length > 50;
+  const CANON_W = 400;
+  const FIDUCIAL_H = isForm100 ? 570 : 450;
+  // Add 12px bottom margin pad so bottom-most row (e.g. Item 15) is never clipped
+  const CANON_H = isForm100 ? 580 : 462;
+
+  displayCanvas.width = CANON_W;
+  displayCanvas.height = CANON_H;
+  const warpCtx = displayCanvas.getContext('2d');
+
+  warpPerspectiveToCanvas(rawImg, corners, warpCtx, CANON_W, CANON_H, FIDUCIAL_H);
+  cachedWarpedData = warpCtx.getImageData(0, 0, CANON_W, CANON_H);
+
+  // Decode QR from either raw frame or warped canvas
+  const qrResult = await decodeStudentQRMultiStage(video, rawCanvas, displayCanvas);
+  if (qrResult && qrResult.studentId) {
+    matchAndDisplayStudent(qrResult.studentId, true);
+  }
+
   const activeSet = document.querySelector('input[name="scan_set"]:checked')?.value || 'A';
-  
+
   video.style.display = 'none';
   displayCanvas.style.display = 'block';
   document.getElementById('viewfinder-overlay').style.display = 'none';
   document.getElementById('btn-retake').style.display = 'inline-block';
-  
-  evaluateWarpedExam100(activeSet, keyItems);
+
+  await evaluateWarpedExam100(activeSet, keyItems);
 }
 
 function onSetSelectorChange(newSet) {
@@ -550,10 +605,10 @@ async function evaluateWarpedExam100(testSet, keyItems) {
   const warpCtx = displayCanvas.getContext('2d');
   warpCtx.putImageData(cachedWarpedData, 0, 0);
 
-  const base64Image = displayCanvas.toDataURL('image/jpeg', 0.9);
-  const activeStudentId = document.getElementById('scan-detected-id').value.trim();
+  const base64Image = displayCanvas.toDataURL('image/jpeg', 0.92);
+  let activeStudentId = document.getElementById('scan-detected-id').value.trim();
 
-  document.getElementById('scan-grade-display').innerHTML = `<span class="spinner-border spinner-border-sm text-primary"></span> Processing...`;
+  document.getElementById('scan-grade-display').innerHTML = `<span class="spinner-border spinner-border-sm text-primary"></span> Grading with OpenCV...`;
 
   const payload = {
     action: 'AI_VISION_GRADE',
@@ -573,6 +628,15 @@ async function evaluateWarpedExam100(testSet, keyItems) {
     return;
   }
 
+  // If backend OpenCV QR reader detected the student ID, apply it
+  if (!activeStudentId && res.studentId) {
+    activeStudentId = res.studentId;
+    matchAndDisplayStudent(activeStudentId, true);
+  }
+
+  // Draw Green/Red/Yellow validation rings on the warped canvas
+  drawValidationOverlays(warpCtx, res.itemBreakdown);
+
   document.getElementById('scan-score-display').innerText = `${res.rawScore} / ${res.totalPoints}`;
   document.getElementById('scan-grade-display').innerHTML = `
     <div class="d-flex align-items-center justify-content-center gap-2 mb-1">
@@ -588,7 +652,7 @@ async function evaluateWarpedExam100(testSet, keyItems) {
     res.itemBreakdown.forEach(ib => {
       html += `<tr>
         <td>#${ib.itemNo}</td>
-        <td>${ib.studentAnswer}</td>
+        <td class="fw-bold">${ib.studentAnswer}</td>
         <td class="text-primary fw-bold">${ib.correctAnswer}</td>
         <td class="${ib.isCorrect ? 'text-success fw-bold' : 'text-danger fw-bold'}">
           <i class="bi bi-${ib.isCorrect ? 'check-circle-fill' : 'x-circle-fill'}"></i>
@@ -610,11 +674,13 @@ async function evaluateWarpedExam100(testSet, keyItems) {
     isPassed: res.isPassed
   };
 
-  if (activeStudentId) document.getElementById('btn-save-scan').disabled = false;
+  if (activeStudentId) {
+    document.getElementById('btn-save-scan').disabled = false;
+  }
 }
 
 function evaluateWarpedExamPiecewise(testSet, keyItems) {
-   evaluateWarpedExam100(testSet, keyItems);
+  evaluateWarpedExam100(testSet, keyItems);
 }
 
 async function submitScannedResult() {
