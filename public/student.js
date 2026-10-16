@@ -1,6 +1,3 @@
-/**
- * ASPECT — Student Portal Controller (Profile, Auth, Results)
- */
 const API_BASE_URL = window.ASPECT_CONFIG?.API_URL || '/api';
 
 let currentUser = null;
@@ -26,8 +23,10 @@ async function callApi(payload) {
 function hideGlobalLoader() {
   const loader = document.getElementById('global-loader');
   if (loader) {
+    // Instantly allow clicks to pass through the invisible overlay
+    loader.style.pointerEvents = 'none';
     loader.style.opacity = '0';
-    setTimeout(() => loader.style.display = 'none', 400);
+    setTimeout(() => { loader.style.display = 'none'; }, 400);
   }
 }
 
@@ -336,7 +335,6 @@ function initStudentDashboard() {
 
 async function loadStudentResults() {
   const container = document.getElementById('results-container');
-  // Visual spinner replacing the raw text
   container.innerHTML = `<div class="col-12 text-center py-5 text-secondary"><div class="spinner-border text-primary mb-3" style="width: 2.5rem; height: 2.5rem;"></div><br><span class="fw-semibold">Retrieving examination records...</span></div>`;
 
   try {

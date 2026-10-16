@@ -30,8 +30,10 @@ async function callApi(payload) {
 function hideGlobalLoader() {
   const loader = document.getElementById('global-loader');
   if (loader) {
+    // Instantly allow clicks to pass through the invisible overlay
+    loader.style.pointerEvents = 'none'; 
     loader.style.opacity = '0';
-    setTimeout(() => loader.style.display = 'none', 400);
+    setTimeout(() => { loader.style.display = 'none'; }, 400);
   }
 }
 
@@ -64,8 +66,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (!isBuilderLoaded) loadExamBuilder();
   });
 
-  await loadClasses();
+  // Unlock the UI instantly before the background tables finish loading
   hideGlobalLoader();
+  await loadClasses();
 });
 
 function logoutTeacher() {
