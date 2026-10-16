@@ -23,6 +23,14 @@ async function callApi(payload) {
   }
 }
 
+function hideGlobalLoader() {
+  const loader = document.getElementById('global-loader');
+  if (loader) {
+    loader.style.opacity = '0';
+    setTimeout(() => loader.style.display = 'none', 400);
+  }
+}
+
 function toggleTheme() {
   const cur = document.documentElement.getAttribute('data-bs-theme');
   const next = cur === 'dark' ? 'light' : 'dark';
@@ -128,17 +136,26 @@ window.addEventListener('DOMContentLoaded', () => {
             return;
           }
           currentUser = res.user;
-          if (checkPasswordForce()) return;
+          if (checkPasswordForce()) {
+            hideGlobalLoader();
+            return;
+          }
           initStudentDashboard();
+          hideGlobalLoader();
         } else {
           localStorage.removeItem('aspect_token');
           sessionToken = null;
           showGuestState();
+          hideGlobalLoader();
         }
       })
-      .catch(() => showGuestState());
+      .catch(() => {
+        showGuestState();
+        hideGlobalLoader();
+      });
   } else {
     showGuestState();
+    hideGlobalLoader();
   }
 });
 
@@ -266,7 +283,7 @@ async function updateProfile(e) {
 
   const btn = document.getElementById('btn-save-prof');
   btn.disabled = true;
-  btn.innerHTML = 'Saving...';
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Saving...';
 
   const res = await callApi({
     action: 'UPDATE_STUDENT_PROFILE',
@@ -319,7 +336,8 @@ function initStudentDashboard() {
 
 async function loadStudentResults() {
   const container = document.getElementById('results-container');
-  container.innerHTML = `<div class="col-12 text-center py-5 text-secondary"><div class="spinner-border text-primary spinner-border-sm mb-2"></div><br>Retrieving exam records...</div>`;
+  // Visual spinner replacing the raw text
+  container.innerHTML = `<div class="col-12 text-center py-5 text-secondary"><div class="spinner-border text-primary mb-3" style="width: 2.5rem; height: 2.5rem;"></div><br><span class="fw-semibold">Retrieving examination records...</span></div>`;
 
   try {
     const res = await callApi({ action: 'GET_STUDENT_RESULTS', sessionToken: sessionToken });

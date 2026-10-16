@@ -9,7 +9,6 @@ let allStudentsList = [];
 let activeBuilderSet = 'A';
 let currentSubmissions = [];
 
-// NEW: Cache state to prevent redundant API calls
 let isRosterLoaded = false;
 let isSubmissionsLoaded = false;
 let isBuilderLoaded = false;
@@ -25,6 +24,14 @@ async function callApi(payload) {
   } catch (err) {
     console.error("API Call Error:", err);
     return { success: false, message: err.toString() };
+  }
+}
+
+function hideGlobalLoader() {
+  const loader = document.getElementById('global-loader');
+  if (loader) {
+    loader.style.opacity = '0';
+    setTimeout(() => loader.style.display = 'none', 400);
   }
 }
 
@@ -47,7 +54,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('nav-avatar').innerText = auth.user.fullName.charAt(0);
   document.getElementById('main-dashboard').style.display = 'block';
 
-  // Set up tab listeners to load data only when the tab is clicked, and only if not cached
   document.getElementById('tab-enrollment-btn').addEventListener('show.bs.tab', () => {
     if (!isRosterLoaded) loadSubjectEnrollment();
   });
@@ -59,6 +65,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   });
 
   await loadClasses();
+  hideGlobalLoader();
 });
 
 function logoutTeacher() {
@@ -87,8 +94,6 @@ function updateThemeIcon(theme) {
   icon.className = theme === 'dark' ? 'bi bi-sun-fill text-warning' : 'bi bi-moon-stars-fill';
 }
 
-// --- PASSWORD MANAGEMENT ---
-
 function openChangePasswordModal() {
   document.getElementById('new-self-password').value = '';
   new bootstrap.Modal(document.getElementById('password-modal')).show();
@@ -97,7 +102,14 @@ function openChangePasswordModal() {
 async function handleChangePassword(e) {
   e.preventDefault();
   const newPassword = document.getElementById('new-self-password').value;
+  const btn = e.target.querySelector('button[type="submit"]');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Updating...';
+
   const res = await callApi({ action: 'CHANGE_PASSWORD', sessionToken, newPassword });
+  btn.disabled = false;
+  btn.innerHTML = 'Update Password';
+
   if (res.success) {
     bootstrap.Modal.getInstance(document.getElementById('password-modal')).hide();
     alert("Your password has been updated!");
@@ -106,12 +118,10 @@ async function handleChangePassword(e) {
   }
 }
 
-// --- FACULTY ACCOUNTS MANAGEMENT ---
-
 async function loadFacultyList() {
   const tbody = document.getElementById('faculty-table-body');
   if (!tbody) return;
-  tbody.innerHTML = '<tr><td colspan="5" class="text-center py-4 text-body-secondary">Loading...</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="5" class="text-center py-5 text-body-secondary"><div class="spinner-border text-primary mb-3" style="width: 2rem; height: 2rem;"></div><br><span class="fw-semibold">Loading faculty accounts...</span></td></tr>';
 
   const res = await callApi({ action: 'GET_FACULTY', sessionToken });
   tbody.innerHTML = '';
@@ -162,6 +172,10 @@ function openEditFacultyModal(id, name, dept, email) {
 
 async function handleSaveFaculty(e) {
   e.preventDefault();
+  const btn = e.target.querySelector('button[type="submit"]');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Saving...';
+
   const facultyData = {
     facultyId: document.getElementById('fac-id').value.trim(),
     fullName: document.getElementById('fac-name').value.trim(),
@@ -171,6 +185,9 @@ async function handleSaveFaculty(e) {
   };
 
   const res = await callApi({ action: 'REGISTER_FACULTY', sessionToken, facultyData });
+  btn.disabled = false;
+  btn.innerHTML = 'Save Faculty Account';
+
   if (res.success) {
     bootstrap.Modal.getInstance(document.getElementById('faculty-modal')).hide();
     await loadFacultyList();
@@ -190,12 +207,12 @@ async function deleteFaculty(facultyId) {
   }
 }
 
-// --- SUBJECTS & CLASSES ---
-
 async function loadClasses() {
+  const tbody = document.getElementById('classes-table-body');
+  if (tbody) tbody.innerHTML = '<tr><td colspan="6" class="text-center py-5 text-body-secondary"><div class="spinner-border text-primary mb-3" style="width: 2rem; height: 2rem;"></div><br><span class="fw-semibold">Retrieving subjects...</span></td></tr>';
+
   const res = await callApi({ action: 'GET_CLASSES', sessionToken });
   const select = document.getElementById('global-class-select');
-  const tbody = document.getElementById('classes-table-body');
 
   if (!res.success) {
     alert("Session expired: " + res.message);
@@ -205,11 +222,11 @@ async function loadClasses() {
 
   classList = res.classes || [];
   select.innerHTML = '';
-  tbody.innerHTML = '';
+  if (tbody) tbody.innerHTML = '';
 
   if (classList.length === 0) {
     select.innerHTML = '<option value="">No Subjects</option>';
-    tbody.innerHTML = '<tr><td colspan="6" class="text-center py-4 text-body-secondary">No subjects found. Click "Add New Subject" to begin.</td></tr>';
+    if (tbody) tbody.innerHTML = '<tr><td colspan="6" class="text-center py-4 text-body-secondary">No subjects found. Click "Add New Subject" to begin.</td></tr>';
     return;
   }
 
@@ -225,20 +242,22 @@ async function loadClasses() {
     if (c.classId === activeClassId) opt.selected = true;
     select.appendChild(opt);
 
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td class="font-monospace fw-bold">${c.subjectCode}</td>
-      <td>${c.subjectTitle}</td>
-      <td>${c.defaultSection || '—'}</td>
-      <td><span class="badge bg-secondary-subtle text-secondary-emphasis">${c.passingPercentage || 70}%</span></td>
-      <td><span class="badge bg-primary-subtle text-primary-emphasis">${c.totalItems || 50} Items</span></td>
-      <td class="text-center">
-        <button class="btn btn-sm btn-outline-primary me-1" onclick="selectClassAndGo('${c.classId}', '#tab-scanner')"><i class="bi bi-camera"></i> Scan</button>
-        <button class="btn btn-sm btn-outline-secondary me-1" onclick="openEditClassModal('${c.classId}')"><i class="bi bi-pencil"></i></button>
-        <button class="btn btn-sm btn-outline-danger" onclick="deleteClass('${c.classId}')"><i class="bi bi-trash"></i></button>
-      </td>
-    `;
-    tbody.appendChild(tr);
+    if (tbody) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td class="font-monospace fw-bold">${c.subjectCode}</td>
+        <td>${c.subjectTitle}</td>
+        <td>${c.defaultSection || '—'}</td>
+        <td><span class="badge bg-secondary-subtle text-secondary-emphasis">${c.passingPercentage || 70}%</span></td>
+        <td><span class="badge bg-primary-subtle text-primary-emphasis">${c.totalItems || 50} Items</span></td>
+        <td class="text-center">
+          <button class="btn btn-sm btn-outline-primary me-1" onclick="selectClassAndGo('${c.classId}', '#tab-scanner')"><i class="bi bi-camera"></i> Scan</button>
+          <button class="btn btn-sm btn-outline-secondary me-1" onclick="openEditClassModal('${c.classId}')"><i class="bi bi-pencil"></i></button>
+          <button class="btn btn-sm btn-outline-danger" onclick="deleteClass('${c.classId}')"><i class="bi bi-trash"></i></button>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    }
   });
 
   await onActiveClassChange(activeClassId);
@@ -249,18 +268,15 @@ async function onActiveClassChange(classId) {
   localStorage.setItem('aspect_active_class', classId);
   document.getElementById('global-class-select').value = classId;
 
-  // Reset cache flags so tabs reload fresh data for the new subject
   isRosterLoaded = false;
   isSubmissionsLoaded = false;
   isBuilderLoaded = false;
 
-  // If the user is currently looking at a specific tab, load its data immediately
   const activeTab = document.querySelector('.nav-link.active').getAttribute('data-bs-target');
   if (activeTab === '#tab-enrollment') await loadSubjectEnrollment();
   if (activeTab === '#tab-submissions') await loadSubmissionsLedger();
   if (activeTab === '#tab-builder') await loadExamBuilder();
 
-  // Always pre-load the builder silently in the background for the scanner
   loadExamBuilderSilent();
 
   if (typeof populateStudentSelect === 'function') {
@@ -305,6 +321,10 @@ function openEditClassModal(classId) {
 async function handleSaveClass(e) {
   e.preventDefault();
   const classId = document.getElementById('modal-class-id').value;
+  const btn = e.target.querySelector('button[type="submit"]');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Saving...';
+
   const payload = {
     action: 'SAVE_CLASS',
     sessionToken,
@@ -318,6 +338,9 @@ async function handleSaveClass(e) {
   };
 
   const res = await callApi(payload);
+  btn.disabled = false;
+  btn.innerHTML = 'Save Subject';
+
   if (res.success) {
     bootstrap.Modal.getInstance(document.getElementById('class-modal')).hide();
     await loadClasses();
@@ -336,8 +359,6 @@ async function deleteClass(classId) {
   }
 }
 
-// --- ROSTER & ENROLLMENTS & BATCH IMPORT ---
-
 async function loadSubjectEnrollment() {
   if (!activeClassId) return;
   const c = classList.find(x => x.classId === activeClassId);
@@ -346,17 +367,22 @@ async function loadSubjectEnrollment() {
     document.getElementById('enroll-subject-subheading').innerText = `Section: ${c.defaultSection || 'None'}`;
   }
 
+  const enrolledTbody = document.getElementById('enrolled-students-body');
+  const availableTbody = document.getElementById('available-students-body');
+  
+  if (enrolledTbody) enrolledTbody.innerHTML = '<tr><td colspan="4" class="text-center py-5 text-body-secondary"><div class="spinner-border text-primary mb-3" style="width: 2rem; height: 2rem;"></div><br><span class="fw-semibold">Loading roster...</span></td></tr>';
+  if (availableTbody) availableTbody.innerHTML = '<tr><td colspan="4" class="text-center py-5 text-body-secondary"><div class="spinner-border text-primary mb-3" style="width: 2rem; height: 2rem;"></div><br><span class="fw-semibold">Loading available students...</span></td></tr>';
+
   const res = await callApi({ action: 'GET_CLASS_ENROLLMENTS', sessionToken, classId: activeClassId });
   if (!res.success) return;
 
   enrolledStudentsList = res.enrolledStudents || [];
   allStudentsList = res.availableStudents || [];
-  isRosterLoaded = true; // Mark as cached
+  isRosterLoaded = true;
 
   const enrolledBadge = document.getElementById('enrolled-count-badge');
   if (enrolledBadge) enrolledBadge.innerText = `${enrolledStudentsList.length} Enrolled`;
 
-  const enrolledTbody = document.getElementById('enrolled-students-body');
   if (enrolledTbody) {
     enrolledTbody.innerHTML = '';
     if (enrolledStudentsList.length === 0) {
@@ -509,7 +535,7 @@ async function handleImportStudents(e) {
 
   const btn = document.getElementById('btn-import');
   btn.disabled = true;
-  btn.innerHTML = 'Importing...';
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Importing...';
 
   const res = await callApi({ action: 'BATCH_IMPORT_STUDENTS', sessionToken, studentsList });
   btn.disabled = false;
@@ -524,8 +550,6 @@ async function handleImportStudents(e) {
   }
 }
 
-// --- EXAM KEY BUILDER ---
-
 async function loadExamBuilderSilent() {
   if (!activeClassId) return;
   const res = await callApi({ action: 'GET_FULL_EXAM_CONFIG', sessionToken, classId: activeClassId });
@@ -536,13 +560,16 @@ async function loadExamBuilderSilent() {
 
 async function loadExamBuilder() {
   if (!activeClassId) return;
+  const tbody = document.getElementById('builder-items-body');
+  if (tbody) tbody.innerHTML = '<tr><td colspan="5" class="text-center py-5 text-body-secondary"><div class="spinner-border text-primary mb-3" style="width: 2rem; height: 2rem;"></div><br><span class="fw-semibold">Loading answer keys...</span></td></tr>';
+
   await loadExamBuilderSilent();
   const c = classList.find(x => x.classId === activeClassId);
   if (c) {
     document.getElementById('builder-class-heading').innerText = `${c.subjectCode}: Answer Key`;
     document.getElementById('builder-class-subheading').innerText = `Configuring ${builderItems.length} Examination Items`;
   }
-  isBuilderLoaded = true; // Mark as cached
+  isBuilderLoaded = true;
   renderBuilderItems();
 }
 
@@ -645,7 +672,7 @@ function applyBatchGenerator() {
 async function saveExamBuilder() {
   const btn = document.getElementById('btn-save-builder');
   btn.disabled = true;
-  btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span> Saving...`;
+  btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Saving...`;
 
   const res = await callApi({
     action: 'SAVE_EXAM_CONFIG',
@@ -669,7 +696,7 @@ async function saveExamBuilder() {
 async function loadSubmissionsLedger() {
   if (!activeClassId) return;
   const tbody = document.getElementById('submissions-table-body');
-  tbody.innerHTML = '<tr><td colspan="8" class="text-center py-4 text-body-secondary">Loading records...</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="8" class="text-center py-5 text-body-secondary"><div class="spinner-border text-primary mb-3" style="width: 2rem; height: 2rem;"></div><br><span class="fw-semibold">Retrieving records...</span></td></tr>';
 
   const res = await callApi({ action: 'GET_SUBMISSIONS', sessionToken, classId: activeClassId });
   tbody.innerHTML = '';
@@ -684,7 +711,7 @@ async function loadSubmissionsLedger() {
   }
 
   currentSubmissions = res.submissions;
-  isSubmissionsLoaded = true; // Mark as cached
+  isSubmissionsLoaded = true;
   let totalScore = 0, passedCount = 0, minScore = 9999, maxScore = -1;
 
   currentSubmissions.forEach(s => {
@@ -768,6 +795,10 @@ async function handleUpdateScore(e) {
   const percentage = totalPoints > 0 ? Math.round((rawScore / totalPoints) * 10000) / 100 : 0;
   const isPassed = percentage >= passPct;
 
+  const btn = e.target.querySelector('button[type="submit"]');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Saving...';
+
   const res = await callApi({
     action: 'UPDATE_SUBMISSION',
     sessionToken,
@@ -777,6 +808,9 @@ async function handleUpdateScore(e) {
     isPassed,
     answers
   });
+
+  btn.disabled = false;
+  btn.innerHTML = '<i class="bi bi-save me-1"></i> Apply Grade Override';
 
   if (res.success) {
     bootstrap.Modal.getInstance(document.getElementById('review-modal')).hide();
