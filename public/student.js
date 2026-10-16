@@ -1,3 +1,6 @@
+/**
+ * ASPECT — Student Portal Controller (Profile, Auth, Results, Enrollment)
+ */
 const API_BASE_URL = window.ASPECT_CONFIG?.API_URL || '/api';
 
 let currentUser = null;
@@ -23,7 +26,6 @@ async function callApi(payload) {
 function hideGlobalLoader() {
   const loader = document.getElementById('global-loader');
   if (loader) {
-    // Instantly allow clicks to pass through the invisible overlay
     loader.style.pointerEvents = 'none';
     loader.style.opacity = '0';
     setTimeout(() => { loader.style.display = 'none'; }, 400);
@@ -333,6 +335,65 @@ function initStudentDashboard() {
   loadStudentResults();
 }
 
+// --- STUDENT SELF-ENROLLMENT ---
+
+async function openEnrollmentModal() {
+  new bootstrap.Modal(document.getElementById('enrollment-modal')).show();
+  loadAvailableClasses();
+}
+
+async function loadAvailableClasses() {
+  const tbody = document.getElementById('enrollment-table-body');
+  tbody.innerHTML = '<tr><td colspan="3" class="text-center py-4 text-secondary"><div class="spinner-border spinner-border-sm text-primary mb-1"></div><br><span class="small">Retrieving subjects...</span></td></tr>';
+
+  const res = await callApi({ action: 'GET_AVAILABLE_CLASSES', sessionToken });
+  tbody.innerHTML = '';
+
+  if (!res.success || !res.classes || res.classes.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="3" class="text-center py-4 text-muted small">No subjects are currently available for enrollment.</td></tr>';
+    return;
+  }
+
+  res.classes.forEach(c => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="ps-3 py-3">
+        <div class="fw-bold text-primary font-monospace">${c.subjectCode}</div>
+        <div class="small fw-semibold text-wrap" style="max-width: 250px;">${c.subjectTitle}</div>
+      </td>
+      <td class="small text-muted"><i class="bi bi-person me-1"></i>${c.instructorName}</td>
+      <td class="text-center pe-3">
+        ${c.isEnrolled 
+          ? `<button class="btn btn-sm btn-outline-secondary w-100" onclick="unenrollClass('${c.classId}')"><i class="bi bi-check2 me-1"></i>Enrolled</button>`
+          : `<button class="btn btn-sm btn-success fw-bold shadow-sm w-100" onclick="enrollClass('${c.classId}')"><i class="bi bi-plus-lg me-1"></i>Enroll</button>`
+        }
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+async function enrollClass(classId) {
+  const res = await callApi({ action: 'ENROLL_IN_CLASS', sessionToken, classId });
+  if (res.success) {
+    loadAvailableClasses();
+  } else {
+    alert(res.message);
+  }
+}
+
+async function unenrollClass(classId) {
+  if(!confirm("Are you sure you want to unenroll from this subject?")) return;
+  const res = await callApi({ action: 'UNENROLL_CLASS', sessionToken, classId });
+  if (res.success) {
+    loadAvailableClasses();
+  } else {
+    alert(res.message);
+  }
+}
+
+// --- GRADE & RESULTS DISPLAY ---
+
 async function loadStudentResults() {
   const container = document.getElementById('results-container');
   container.innerHTML = `<div class="col-12 text-center py-5 text-secondary"><div class="spinner-border text-primary mb-3" style="width: 2.5rem; height: 2.5rem;"></div><br><span class="fw-semibold">Retrieving examination records...</span></div>`;
@@ -361,7 +422,7 @@ function renderResults(results) {
         <div class="card p-5 text-center border-dashed">
           <i class="bi bi-folder2-open display-4 text-body-tertiary mb-2"></i>
           <h6 class="fw-bold text-body-secondary">No Exam Scores Recorded Yet</h6>
-          <p class="small text-body-secondary mb-0">Your exam records will populate here once evaluated.</p>
+          <p class="small text-body-secondary mb-0">If you just enrolled, your exam records will populate here once the faculty evaluates them.</p>
         </div>
       </div>`;
     return;

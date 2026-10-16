@@ -256,6 +256,45 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                 "results": results
             }
 
+        elif act == "GET_AVAILABLE_CLASSES":
+            user = validate_token(db, payload.sessionToken)
+            if not user or user.role != "STUDENT":
+                return {"success": False, "message": "Unauthorized session."}
+            all_classes = db.query(CourseClass).all()
+            my_enrollments = {e.class_id for e in db.query(Enrollment).filter_by(student_id=user.student_id).all()}
+            teachers = {t.student_id: t.full_name for t in db.query(RosterUser).filter_by(role="TEACHER").all()}
+            
+            res_classes = []
+            for c in all_classes:
+                res_classes.append({
+                    "classId": c.class_id,
+                    "subjectCode": c.subject_code,
+                    "subjectTitle": c.subject_title,
+                    "instructorName": teachers.get(c.owner_teacher_id, "Faculty"),
+                    "isEnrolled": c.class_id in my_enrollments
+                })
+            return {"success": True, "classes": res_classes}
+
+        elif act == "ENROLL_IN_CLASS":
+            user = validate_token(db, payload.sessionToken)
+            if not user or user.role != "STUDENT":
+                return {"success": False, "message": "Unauthorized session."}
+            if not payload.classId:
+                return {"success": False, "message": "Class ID required."}
+            existing = db.query(Enrollment).filter_by(class_id=payload.classId, student_id=user.student_id).first()
+            if not existing:
+                db.add(Enrollment(class_id=payload.classId, student_id=user.student_id))
+                db.commit()
+            return {"success": True, "message": "Successfully enrolled."}
+
+        elif act == "UNENROLL_CLASS":
+            user = validate_token(db, payload.sessionToken)
+            if not user or user.role != "STUDENT":
+                return {"success": False, "message": "Unauthorized session."}
+            db.query(Enrollment).filter_by(class_id=payload.classId, student_id=user.student_id).delete()
+            db.commit()
+            return {"success": True, "message": "Successfully unenrolled."}
+
         # --- TEACHER / SYSTEM ADMIN ENDPOINTS BELOW ---
         user = validate_token(db, payload.sessionToken)
         if not user or user.role != "TEACHER":
