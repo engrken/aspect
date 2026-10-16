@@ -1,6 +1,6 @@
 /**
- * ASPECT Engine — Client-Side Optical Mark Recognition Pipeline
- * ZipGrade-style Instant Evaluation (Zero Network Latency)
+ * ASPECT Engine — Optical Mark Recognition & Vision Pipeline
+ * Outer-Quadrant Fiducial Lock + High-Res QR Decoder
  */
 
 let videoStream = null;
@@ -80,7 +80,7 @@ async function initScanner() {
   }
 
   if (enrolledStudentsList.length === 0 && activeClassId) {
-    if (typeof loadSubjectEnrollment === 'function') await loadSubjectEnrollment();
+    await loadSubjectEnrollment();
   }
   populateStudentSelect();
 
@@ -141,7 +141,7 @@ function updateTargetUI(isLocked) {
 
   if (label) {
     if (isLocked) {
-      label.innerText = `Corners Locked! Evaluating...`;
+      label.innerText = `Corners Locked! Capturing (${stableAlignmentCount}/${REQUIRED_STABLE_FRAMES})...`;
       label.style.color = '#20c997';
     } else {
       label.innerText = "Fit all 4 outer corner black squares inside the frame";
@@ -220,9 +220,14 @@ function findFourCornersRobust(imgData, W, H) {
 
   const visited = new Uint8Array(W * H);
   const candidates = [];
-  const minSize = 8, maxSize = 36;
-  const qX = new Int32Array(3000), qY = new Int32Array(3000);
-  const startY = 6, endY = H - 6, startX = 6, endX = W - 6;
+  const minSize = 8;
+  const maxSize = 36;
+
+  const qX = new Int32Array(3000);
+  const qY = new Int32Array(3000);
+
+  const startY = 6, endY = H - 6;
+  const startX = 6, endX = W - 6;
 
   for (let sy = startY; sy < endY; sy += 2) {
     for (let sx = startX; sx < endX; sx += 2) {
@@ -231,7 +236,10 @@ function findFourCornersRobust(imgData, W, H) {
 
       const idx = vIdx * 4;
       const lum = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
-      if (lum >= darkThreshold) { visited[vIdx] = 1; continue; }
+      if (lum >= darkThreshold) {
+        visited[vIdx] = 1;
+        continue;
+      }
 
       let head = 0, tail = 0;
       qX[tail] = sx; qY[tail] = sy; tail++;
@@ -269,12 +277,34 @@ function findFourCornersRobust(imgData, W, H) {
 
       const bw = bMaxX - bMinX + 1;
       const bh = bMaxY - bMinY + 1;
+
       if (bw >= minSize && bw <= maxSize && bh >= minSize && bh <= maxSize) {
         const aspect = bw / bh;
         if (aspect >= 0.68 && aspect <= 1.45) {
           const areaRatio = count / (bw * bh);
           if (areaRatio >= 0.65) {
-            candidates.push({ x: sumX / count, y: sumY / count });
+            const pad = 5;
+            const sx0 = Math.max(0, bMinX - pad), sx1 = Math.min(W - 1, bMaxX + pad);
+            const sy0 = Math.max(0, bMinY - pad), sy1 = Math.min(H - 1, bMaxY + pad);
+            let surrSum = 0, surrCnt = 0;
+            for (let py = sy0; py <= sy1; py += 2) {
+              for (let px = sx0; px <= sx1; px += 2) {
+                if (px >= bMinX - 1 && px <= bMaxX + 1 && py >= bMinY - 1 && py <= bMaxY + 1) continue;
+                const pIdx = (py * W + px) * 4;
+                surrSum += 0.299 * data[pIdx] + 0.587 * data[pIdx + 1] + 0.114 * data[pIdx + 2];
+                surrCnt++;
+              }
+            }
+            const surrMean = surrCnt > 0 ? surrSum / surrCnt : 0;
+            if (surrMean > darkThreshold + 25) {
+              candidates.push({
+                x: sumX / count,
+                y: sumY / count,
+                bw,
+                bh,
+                size: (bw + bh) * 0.5
+              });
+            }
           }
         }
       }
@@ -295,7 +325,11 @@ function findFourCornersRobust(imgData, W, H) {
   blList.sort((a, b) => (a.x - a.y) - (b.x - b.y));
   brList.sort((a, b) => (b.x + b.y) - (a.x + a.y));
 
-  const tl = tlList[0], tr = trList[0], bl = blList[0], br = brList[0];
+  const tl = tlList[0];
+  const tr = trList[0];
+  const bl = blList[0];
+  const br = brList[0];
+
   const topW = Math.hypot(tr.x - tl.x, tr.y - tl.y);
   const botW = Math.hypot(br.x - bl.x, br.y - bl.y);
   const leftH = Math.hypot(bl.x - tl.x, bl.y - tl.y);
@@ -309,50 +343,48 @@ function findFourCornersRobust(imgData, W, H) {
 }
 
 function warpPerspectiveToCanvas(srcImgData, corners, dstCtx, dstW, dstH) {
-  const src = [corners.tl.x, corners.tl.y, corners.tr.x, corners.tr.y, corners.br.x, corners.br.y, corners.bl.x, corners.bl.y];
-  const dst = [12, 12, dstW - 12, 12, dstW - 12, dstH - 12, 12, dstH - 12];
-  const a = [];
-  for (let i = 0; i < 4; i++) {
-    const sx = src[i * 2], sy = src[i * 2 + 1], dx = dst[i * 2], dy = dst[i * 2 + 1];
-    a.push([sx, sy, 1, 0, 0, 0, -dx * sx, -dx * sy, dx]);
-    a.push([0, 0, 0, sx, sy, 1, -dy * sx, -dy * sy, dy]);
-  }
-  for (let i = 0; i < 8; i++) {
-    let maxRow = i;
-    for (let k = i + 1; k < 8; k++) if (Math.abs(a[k][i]) > Math.abs(a[maxRow][i])) maxRow = k;
-    const temp = a[i]; a[i] = a[maxRow]; a[maxRow] = temp;
-    for (let k = i + 1; k < 8; k++) {
-      const c = -a[k][i] / a[i][i];
-      for (let j = i; j <= 8; j++) { if (i === j) a[k][j] = 0; else a[k][j] += c * a[i][j]; }
-    }
-  }
-  const h = new Array(9); h[8] = 1;
-  for (let i = 7; i >= 0; i--) {
-    let sum = a[i][8];
-    for (let j = i + 1; j < 8; j++) sum -= a[i][j] * h[j];
-    h[i] = sum / a[i][i];
-  }
+  const src = [
+    corners.tl.x, corners.tl.y,
+    corners.tr.x, corners.tr.y,
+    corners.br.x, corners.br.y,
+    corners.bl.x, corners.bl.y
+  ];
+  const dst = [
+    12, 12,
+    dstW - 12, 12,
+    dstW - 12, dstH - 12,
+    12, dstH - 12
+  ];
+  const H_inv = getPerspectiveTransform(dst, src);
 
   const dstImgData = dstCtx.createImageData(dstW, dstH);
   const dstData = dstImgData.data;
   const srcData = srcImgData.data;
-  const srcW = srcImgData.width, srcH = srcImgData.height;
+  const srcW = srcImgData.width;
+  const srcH = srcImgData.height;
 
   for (let y = 0; y < dstH; y++) {
     for (let x = 0; x < dstW; x++) {
-      const denominator = h[6] * x + h[7] * y + h[8];
-      const sx = (h[0] * x + h[1] * y + h[2]) / denominator;
-      const sy = (h[3] * x + h[4] * y + h[5]) / denominator;
+      const denominator = H_inv[6] * x + H_inv[7] * y + H_inv[8];
+      const sx = (H_inv[0] * x + H_inv[1] * y + H_inv[2]) / denominator;
+      const sy = (H_inv[3] * x + H_inv[4] * y + H_inv[5]) / denominator;
       const dstIdx = (y * dstW + x) * 4;
 
       if (sx >= 0 && sx < srcW - 1 && sy >= 0 && sy < srcH - 1) {
-        const x0 = Math.floor(sx), x1 = x0 + 1, y0 = Math.floor(sy), y1 = y0 + 1;
+        const x0 = Math.floor(sx), x1 = x0 + 1;
+        const y0 = Math.floor(sy), y1 = y0 + 1;
         const dx = sx - x0, dy = sy - y0;
-        const idx00 = (y0 * srcW + x0) * 4, idx10 = (y0 * srcW + x1) * 4, idx01 = (y1 * srcW + x0) * 4, idx11 = (y1 * srcW + x1) * 4;
+
+        const idx00 = (y0 * srcW + x0) * 4;
+        const idx10 = (y0 * srcW + x1) * 4;
+        const idx01 = (y1 * srcW + x0) * 4;
+        const idx11 = (y1 * srcW + x1) * 4;
 
         for (let c = 0; c < 3; c++) {
-          dstData[dstIdx + c] = (1 - dx) * (1 - dy) * srcData[idx00 + c] + dx * (1 - dy) * srcData[idx10 + c] +
-                                (1 - dx) * dy * srcData[idx01 + c] + dx * dy * srcData[idx11 + c];
+          dstData[dstIdx + c] = (1 - dx) * (1 - dy) * srcData[idx00 + c] +
+                                dx * (1 - dy) * srcData[idx10 + c] +
+                                (1 - dx) * dy * srcData[idx01 + c] +
+                                dx * dy * srcData[idx11 + c];
         }
         dstData[dstIdx + 3] = 255;
       } else {
@@ -363,6 +395,38 @@ function warpPerspectiveToCanvas(srcImgData, corners, dstCtx, dstW, dstH) {
   dstCtx.putImageData(dstImgData, 0, 0);
 }
 
+function getPerspectiveTransform(src, dst) {
+  const a = [];
+  for (let i = 0; i < 4; i++) {
+    const sx = src[i * 2], sy = src[i * 2 + 1];
+    const dx = dst[i * 2], dy = dst[i * 2 + 1];
+    a.push([sx, sy, 1, 0, 0, 0, -dx * sx, -dx * sy, dx]);
+    a.push([0, 0, 0, sx, sy, 1, -dy * sx, -dy * sy, dy]);
+  }
+  for (let i = 0; i < 8; i++) {
+    let maxRow = i;
+    for (let k = i + 1; k < 8; k++) {
+      if (Math.abs(a[k][i]) > Math.abs(a[maxRow][i])) maxRow = k;
+    }
+    const temp = a[i]; a[i] = a[maxRow]; a[maxRow] = temp;
+    for (let k = i + 1; k < 8; k++) {
+      const c = -a[k][i] / a[i][i];
+      for (let j = i; j <= 8; j++) {
+        if (i === j) a[k][j] = 0;
+        else a[k][j] += c * a[i][j];
+      }
+    }
+  }
+  const h = new Array(9);
+  h[8] = 1;
+  for (let i = 7; i >= 0; i--) {
+    let sum = a[i][8];
+    for (let j = i + 1; j < 8; j++) sum -= a[i][j] * h[j];
+    h[i] = sum / a[i][i];
+  }
+  return h;
+}
+
 async function decodeStudentQRMultiStage(videoElement, rawCanvas) {
   if (nativeBarcodeDetector) {
     try {
@@ -370,11 +434,29 @@ async function decodeStudentQRMultiStage(videoElement, rawCanvas) {
       if (barcodes && barcodes.length > 0) return cleanQrPayload(barcodes[0].rawValue);
     } catch (e) {}
   }
+
   if (typeof jsQR !== "undefined" && rawCanvas) {
-    const rx = Math.floor(rawCanvas.width * 0.45), ry = 0, rw = rawCanvas.width - rx, rh = Math.floor(rawCanvas.height * 0.45);
-    const qrCropCanvas = document.createElement('canvas'); qrCropCanvas.width = rw; qrCropCanvas.height = rh;
-    const qrCtx = qrCropCanvas.getContext('2d'); qrCtx.drawImage(rawCanvas, rx, ry, rw, rh, 0, 0, rw, rh);
-    let code = jsQR(qrCtx.getImageData(0, 0, rw, rh).data, rw, rh, { inversionAttempts: "attemptBoth" });
+    const rx = Math.floor(rawCanvas.width * 0.45);
+    const ry = 0;
+    const rw = rawCanvas.width - rx;
+    const rh = Math.floor(rawCanvas.height * 0.45);
+    const qrCropCanvas = document.createElement('canvas');
+    qrCropCanvas.width = rw;
+    qrCropCanvas.height = rh;
+    const qrCtx = qrCropCanvas.getContext('2d');
+    qrCtx.drawImage(rawCanvas, rx, ry, rw, rh, 0, 0, rw, rh);
+    const cropData = qrCtx.getImageData(0, 0, rw, rh);
+    let code = jsQR(cropData.data, rw, rh, { inversionAttempts: "attemptBoth" });
+    if (code && code.data) return cleanQrPayload(code.data);
+
+    const probeW = Math.min(rawCanvas.width, 1000);
+    const probeH = Math.round(probeW * (rawCanvas.height / rawCanvas.width));
+    const pCanvas = document.createElement('canvas');
+    pCanvas.width = probeW; pCanvas.height = probeH;
+    const pCtx = pCanvas.getContext('2d');
+    pCtx.drawImage(rawCanvas, 0, 0, probeW, probeH);
+    const imgData = pCtx.getImageData(0, 0, probeW, probeH);
+    code = jsQR(imgData.data, probeW, probeH, { inversionAttempts: "attemptBoth" });
     if (code && code.data) return cleanQrPayload(code.data);
   }
   return null;
@@ -390,165 +472,31 @@ function cleanQrPayload(raw) {
   return { studentId: cleaned, formType: 'UNKNOWN' };
 }
 
-/**
- * CLIENT-SIDE JAVASCRIPT OMR EVALUATION (Zero Network Delay)
- */
-function evaluateExamLocally(canvas, keyItems, defaultSet) {
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  const width = canvas.width;
-  const height = canvas.height;
-  const imgData = ctx.getImageData(0, 0, width, height);
-  const data = imgData.data;
-
-  // Helper to extract Bubble Darkness
-  const getLum = (x0, x1, y0, y1, pct) => {
-    let lums = [];
-    for(let y=y0; y<=y1; y++) {
-      for(let x=x0; x<=x1; x++) {
-        if(x>=0 && x<width && y>=0 && y<height) {
-          let i = (y*width + x)*4;
-          lums.push(0.299*data[i] + 0.587*data[i+1] + 0.114*data[i+2]);
-        }
-      }
-    }
-    if(!lums.length) return 255;
-    lums.sort((a,b)=>a-b);
-    return lums[Math.floor(lums.length * pct)];
-  };
-
-  // 1. Detect Test Set shaded (A or B)
-  let lumA = getLum(87, 98, 98, 109, 0.35);
-  let lumB = getLum(143, 154, 98, 109, 0.35);
-  let detectedSet = defaultSet || 'A';
-  if (lumB + 20.0 < lumA && lumB < 135.0) detectedSet = 'B';
-  else if (lumA + 20.0 < lumB && lumA < 135.0) detectedSet = 'A';
-
-  // 2. Map Expected Coordinates
-  const isForm100 = keyItems.length > 50;
-  const itemCoords = {};
-  if (isForm100) {
-    const colXs = [[46, 58, 70, 82], [138, 150, 162, 174], [230, 242, 254, 266], [322, 334, 346, 358]];
-    let rowStartY = 136.0, rowPitch = 16.5;
-    for (let c = 0; c < 4; c++) {
-      for (let r = 0; r < 25; r++) {
-        itemCoords[c * 25 + r + 1] = { xs: colXs[c], cy: Math.round(rowStartY + r * rowPitch) };
-      }
-    }
-  } else {
-    const colXs = [[56, 72, 88, 104], [180, 196, 212, 228], [304, 320, 336, 352]];
-    let topY = 136.0, botY = 284.0, pitch = 16.0;
-    const blocks = [
-      { c: 0, ts: 1, te: 8, bs: 9, be: 17 },
-      { c: 1, ts: 18, te: 25, bs: 26, be: 34 },
-      { c: 2, ts: 35, te: 42, bs: 43, be: 50 }
-    ];
-    blocks.forEach(b => {
-      for (let i = b.ts; i <= b.te; i++) itemCoords[i] = { xs: colXs[b.c], cy: Math.round(topY + (i - b.ts) * pitch) };
-      for (let i = b.bs; i <= b.be; i++) itemCoords[i] = { xs: colXs[b.c], cy: Math.round(botY + (i - b.bs) * pitch) };
-    });
-  }
-
-  // 3. Process Bubbles
-  const boxR = 5;
-  const options = ['A', 'B', 'C', 'D'];
-  let rawScore = 0;
-  let totalPoints = 0;
-  const detectedAnswers = {};
-  const itemBreakdown = [];
-  const targetKey = detectedSet === 'B' ? 'setB' : 'setA';
-
-  keyItems.forEach(item => {
-    const itemNo = parseInt(item.itemNo);
-    const pts = parseInt(item.points || 1);
-    const correctAns = (item[targetKey] || '').toUpperCase().trim();
-    const qType = (item.type || 'MCQ').toUpperCase();
-
-    if (!itemCoords[itemNo]) return;
-    const coords = itemCoords[itemNo];
-
-    const bubbleStats = [];
-    coords.xs.forEach((cx, idx) => {
-      cx = Math.round(cx);
-      let cy = coords.cy;
-      let coreLum = getLum(cx - boxR, cx + boxR, cy - boxR, cy + boxR, 0.40);
-      bubbleStats.push({ opt: options[idx], lum: coreLum, x: cx, y: cy });
-    });
-
-    const sortedStats = [...bubbleStats].sort((a, b) => a.lum - b.lum);
-    const darkest = sortedStats[0];
-    const secondDarkest = sortedStats[1];
-    const lightest = sortedStats[3];
-
-    let studentAns = null;
-    let isDoubleShaded = false;
-
-    const dropFromLightest = lightest.lum - darkest.lum;
-    const separation = secondDarkest.lum - darkest.lum;
-
-    if (dropFromLightest >= 18.0 && darkest.lum < 145.0) {
-      if (separation < 9.0 && (lightest.lum - secondDarkest.lum) >= 18.0) {
-        studentAns = `${darkest.opt},${secondDarkest.opt}`;
-        isDoubleShaded = true;
-      } else {
-        studentAns = darkest.opt;
-      }
-    }
-
-    let normalizedAns = studentAns;
-    if (qType === 'TF' && normalizedAns && !isDoubleShaded) {
-      if (normalizedAns === 'A') normalizedAns = 'T';
-      else if (normalizedAns === 'B') normalizedAns = 'F';
-      else normalizedAns = null;
-    }
-
-    const isCorrect = !!(normalizedAns && !isDoubleShaded && (normalizedAns === correctAns || correctAns === '*' || correctAns === 'ALL'));
-    if (isCorrect) rawScore += pts;
-    totalPoints += pts;
-
-    if (normalizedAns) detectedAnswers[itemNo.toString()] = normalizedAns;
-
-    const bubblesOverlay = bubbleStats.map(b => {
-      let optNorm = b.opt;
-      if (qType === 'TF') {
-        if (optNorm === 'A') optNorm = 'T';
-        else if (optNorm === 'B') optNorm = 'F';
-      }
-      const wasMarked = (studentAns || '').split(',').includes(b.opt);
-      const isKey = (optNorm === correctAns);
-      let state = 'none';
-      if (wasMarked && isCorrect) state = 'correct';
-      else if (wasMarked && !isCorrect) state = 'wrong';
-      else if (!wasMarked && isKey && !isCorrect) state = 'missed';
-
-      return { x: b.x, y: b.y, r: isForm100 ? 4.8 : 5.8, state };
-    }).filter(b => b.state !== 'none');
-
-    itemBreakdown.push({
-      itemNo,
-      studentAnswer: normalizedAns || '(Blank)',
-      correctAnswer: correctAns,
-      isCorrect,
-      bubbles: bubblesOverlay
-    });
-  });
-
-  return { detectedAnswers, rawScore, totalPoints, itemBreakdown, detectedSet };
-}
-
 function drawValidationOverlays(ctx, itemBreakdown) {
   if (!itemBreakdown || !Array.isArray(itemBreakdown)) return;
+  const isForm100 = itemBreakdown.length > 50;
   itemBreakdown.forEach(ib => {
     if (!ib.bubbles) return;
     ib.bubbles.forEach(b => {
       ctx.save();
       ctx.beginPath();
-      ctx.arc(b.x, b.y, b.r || 5.8, 0, 2 * Math.PI);
+      ctx.arc(b.x, b.y, b.r || (isForm100 ? 4.8 : 5.8), 0, 2 * Math.PI);
       if (b.state === 'correct') {
-        ctx.strokeStyle = '#28a745'; ctx.fillStyle = 'rgba(40, 167, 69, 0.28)'; ctx.lineWidth = 2.0; ctx.fill(); ctx.stroke();
+        ctx.strokeStyle = '#28a745';
+        ctx.fillStyle = 'rgba(40, 167, 69, 0.28)';
+        ctx.lineWidth = 2.0;
+        ctx.fill();
+        ctx.stroke();
       } else if (b.state === 'wrong') {
-        ctx.strokeStyle = '#dc3545'; ctx.fillStyle = 'rgba(220, 53, 69, 0.28)'; ctx.lineWidth = 2.0; ctx.fill(); ctx.stroke();
+        ctx.strokeStyle = '#dc3545';
+        ctx.fillStyle = 'rgba(220, 53, 69, 0.28)';
+        ctx.lineWidth = 2.0;
+        ctx.fill();
+        ctx.stroke();
       } else if (b.state === 'missed') {
-        ctx.strokeStyle = '#ffc107'; ctx.lineWidth = 1.8; ctx.stroke();
+        ctx.strokeStyle = '#ffc107';
+        ctx.lineWidth = 1.8;
+        ctx.stroke();
       }
       ctx.restore();
     });
@@ -577,96 +525,144 @@ async function processCameraFrame(preDetectedCorners = null, preProbeH = null) {
     return;
   }
 
-  // Generate Image and Warping Canvas
   const probeH = preProbeH || Math.round(640 * (video.videoHeight / video.videoWidth));
   let probeCorners = preDetectedCorners;
 
   if (!probeCorners) {
-    const probeCanvas = document.createElement('canvas'); probeCanvas.width = 640; probeCanvas.height = probeH;
-    const pCtx = probeCanvas.getContext('2d', { willReadFrequently: true });
+    const probeCanvas = document.createElement('canvas');
+    probeCanvas.width = 640;
+    probeCanvas.height = probeH;
+    const pCtx = probeCanvas.getContext('2d');
     pCtx.drawImage(video, 0, 0, 640, probeH);
-    probeCorners = findFourCornersRobust(pCtx.getImageData(0, 0, 640, probeH), 640, probeH);
+    const probeImg = pCtx.getImageData(0, 0, 640, probeH);
+    probeCorners = findFourCornersRobust(probeImg, 640, probeH);
   }
 
-  // THE FIX: Reject the scan if corners are still not found
-  if (!probeCorners) {
-    alert("Alignment Failed: Could not detect the 4 black corner squares. Please ensure the paper is flat, well-lit, and all 4 corners are visible inside the view.");
-    resetToLiveCamera();
-    return;
-  }
-
-  const rawCanvas = document.createElement('canvas'); rawCanvas.width = video.videoWidth; rawCanvas.height = video.videoHeight;
-  const rawCtx = rawCanvas.getContext('2d', { willReadFrequently: true }); 
+  const rawCanvas = document.createElement('canvas');
+  rawCanvas.width = video.videoWidth;
+  rawCanvas.height = video.videoHeight;
+  const rawCtx = rawCanvas.getContext('2d');
   rawCtx.drawImage(video, 0, 0, rawCanvas.width, rawCanvas.height);
   const rawImg = rawCtx.getImageData(0, 0, rawCanvas.width, rawCanvas.height);
 
-  // Decode QR locally
-  let activeStudentId = document.getElementById('scan-detected-id').value.trim();
   const qrResult = await decodeStudentQRMultiStage(video, rawCanvas);
   if (qrResult && qrResult.studentId) {
-    activeStudentId = qrResult.studentId;
-    matchAndDisplayStudent(activeStudentId, true);
+    matchAndDisplayStudent(qrResult.studentId, true);
   }
 
-  // Set Output Canvas size
   const isForm100 = keyItems.length > 50;
-  displayCanvas.width = 400; displayCanvas.height = isForm100 ? 570 : 450;
-  const warpCtx = displayCanvas.getContext('2d', { willReadFrequently: true });
+  const CANON_W = 400;
+  const CANON_H = isForm100 ? 570 : 450;
 
-  // Warp into place locally using the strict corners
-  const scaleX = video.videoWidth / 640, scaleY = video.videoHeight / probeH;
-  const corners = {
-    tl: { x: probeCorners.tl.x * scaleX, y: probeCorners.tl.y * scaleY },
-    tr: { x: probeCorners.tr.x * scaleX, y: probeCorners.tr.y * scaleY },
-    bl: { x: probeCorners.bl.x * scaleX, y: probeCorners.bl.y * scaleY },
-    br: { x: probeCorners.br.x * scaleX, y: probeCorners.br.y * scaleY }
-  };
-  
-  warpPerspectiveToCanvas(rawImg, corners, warpCtx, displayCanvas.width, displayCanvas.height);
-  cachedWarpedData = warpCtx.getImageData(0, 0, displayCanvas.width, displayCanvas.height);
+  displayCanvas.width = CANON_W;
+  displayCanvas.height = CANON_H;
+  const warpCtx = displayCanvas.getContext('2d');
 
-  // --- LOCAL EVALUATION ---
+  if (probeCorners) {
+    const scaleX = video.videoWidth / 640;
+    const scaleY = video.videoHeight / probeH;
+    const corners = {
+      tl: { x: probeCorners.tl.x * scaleX, y: probeCorners.tl.y * scaleY },
+      tr: { x: probeCorners.tr.x * scaleX, y: probeCorners.tr.y * scaleY },
+      bl: { x: probeCorners.bl.x * scaleX, y: probeCorners.bl.y * scaleY },
+      br: { x: probeCorners.br.x * scaleX, y: probeCorners.br.y * scaleY }
+    };
+    warpPerspectiveToCanvas(rawImg, corners, warpCtx, CANON_W, CANON_H);
+    cachedWarpedData = warpCtx.getImageData(0, 0, CANON_W, CANON_H);
+  } else {
+    const sendW = 800;
+    const sendH = Math.round(800 * (video.videoHeight / video.videoWidth));
+    displayCanvas.width = sendW;
+    displayCanvas.height = sendH;
+    warpCtx.drawImage(video, 0, 0, sendW, sendH);
+    cachedWarpedData = warpCtx.getImageData(0, 0, sendW, sendH);
+  }
+
   const activeSet = document.querySelector('input[name="scan_set"]:checked')?.value || 'A';
-  const result = evaluateExamLocally(displayCanvas, keyItems, activeSet);
 
-  // Calculate pass percentage
-  const activeClassObj = classList.find(cls => cls.classId === activeClassId);
-  const passPct = activeClassObj ? activeClassObj.passingPercentage : 70;
-  const percentage = result.totalPoints > 0 ? Math.round((result.rawScore / result.totalPoints) * 10000) / 100 : 0.0;
-  const isPassed = percentage >= passPct;
-  const status = isPassed ? "PASSED" : "FAILED";
-
-  // Render Overlays directly on canvas
-  drawValidationOverlays(warpCtx, result.itemBreakdown);
-
-  // Compress image to save bandwidth
-  const warpedBase64 = displayCanvas.toDataURL('image/jpeg', 0.60);
-
-  // Hide Video, Show Graded Canvas
   video.style.display = 'none';
   displayCanvas.style.display = 'block';
   document.getElementById('viewfinder-overlay').style.display = 'none';
   document.getElementById('btn-retake').style.display = 'inline-block';
 
-  // Update UI instantly
-  if (result.detectedSet) {
-    const radioEl = document.getElementById(result.detectedSet === 'B' ? 'scan_set_b' : 'scan_set_a');
+  await evaluateWarpedExam100(activeSet, keyItems);
+}
+
+function onSetSelectorChange(newSet) {
+  if (cachedWarpedData) {
+    evaluateWarpedExam100(newSet, builderItems);
+  }
+}
+
+async function evaluateWarpedExam100(testSet, keyItems) {
+  if (!cachedWarpedData) return;
+  const displayCanvas = document.getElementById('scanner-canvas');
+  const warpCtx = displayCanvas.getContext('2d');
+  warpCtx.putImageData(cachedWarpedData, 0, 0);
+
+  const base64Image = displayCanvas.toDataURL('image/jpeg', 0.92);
+  let activeStudentId = document.getElementById('scan-detected-id').value.trim();
+
+  document.getElementById('scan-grade-display').innerHTML = `<span class="spinner-border spinner-border-sm text-primary"></span> Grading with OpenCV...`;
+
+  const payload = {
+    action: 'AI_VISION_GRADE',
+    sessionToken: sessionToken,
+    classId: activeClassId,
+    studentId: activeStudentId,
+    testSet: testSet,
+    items: keyItems,
+    base64Image: base64Image
+  };
+
+  const res = await callApi(payload);
+
+  if (!res.success) {
+    alert("Grading Error: " + res.message);
+    resetToLiveCamera();
+    return;
+  }
+
+  if (!activeStudentId && res.studentId) {
+    activeStudentId = res.studentId;
+    matchAndDisplayStudent(activeStudentId, true);
+  }
+
+  if (res.detectedSet) {
+    const radioEl = document.getElementById(res.detectedSet === 'B' ? 'scan_set_b' : 'scan_set_a');
     if (radioEl) radioEl.checked = true;
   }
 
-  document.getElementById('scan-score-display').innerText = `${result.rawScore} / ${result.totalPoints}`;
+  if (res.warpedBase64) {
+    await new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        displayCanvas.width = img.width;
+        displayCanvas.height = img.height;
+        warpCtx.drawImage(img, 0, 0);
+        cachedWarpedData = warpCtx.getImageData(0, 0, img.width, img.height);
+        resolve();
+      };
+      img.onerror = resolve;
+      img.src = "data:image/jpeg;base64," + res.warpedBase64;
+    });
+  }
+
+  drawValidationOverlays(warpCtx, res.itemBreakdown);
+
+  document.getElementById('scan-score-display').innerText = `${res.rawScore} / ${res.totalPoints}`;
   document.getElementById('scan-grade-display').innerHTML = `
     <div class="d-flex align-items-center justify-content-center gap-2 mb-1">
-      <span class="badge ${isPassed ? 'bg-success' : 'bg-danger'} fs-6">${status}</span>
-      <span class="fw-bold fs-5">${percentage}%</span>
+      <span class="badge ${res.isPassed ? 'bg-success' : 'bg-danger'} fs-6">${res.status}</span>
+      <span class="fw-bold fs-5">${res.percentage}%</span>
     </div>
   `;
 
   const breakdownContainer = document.getElementById('ai-breakdown-container');
-  if (breakdownContainer && result.itemBreakdown) {
+  if (breakdownContainer && res.itemBreakdown) {
     let html = `<table class="table table-sm table-borderless mb-0" style="font-size: 0.73rem;">
       <thead class="table-light sticky-top"><tr><th>Item</th><th>Mark</th><th>Key</th><th>Result</th></tr></thead><tbody>`;
-    result.itemBreakdown.forEach(ib => {
+    res.itemBreakdown.forEach(ib => {
       html += `<tr>
         <td>#${ib.itemNo}</td>
         <td class="fw-bold">${ib.studentAnswer}</td>
@@ -683,19 +679,23 @@ async function processCameraFrame(preDetectedCorners = null, preProbeH = null) {
   lastScannedData = {
     classId: activeClassId,
     studentId: activeStudentId,
-    testSet: result.detectedSet,
-    answers: result.detectedAnswers,
-    rawScore: result.rawScore,
-    totalPoints: result.totalPoints,
-    percentage: percentage,
-    isPassed: isPassed,
-    warpedBase64: warpedBase64,
-    itemBreakdown: result.itemBreakdown
+    testSet: res.detectedSet || testSet,
+    answers: res.answers,
+    rawScore: res.rawScore,
+    totalPoints: res.totalPoints,
+    percentage: res.percentage,
+    isPassed: res.isPassed,
+    warpedBase64: res.warpedBase64 || base64Image,
+    itemBreakdown: res.itemBreakdown
   };
 
   if (activeStudentId) {
     document.getElementById('btn-save-scan').disabled = false;
   }
+}
+
+function evaluateWarpedExamPiecewise(testSet, keyItems) {
+  evaluateWarpedExam100(testSet, keyItems);
 }
 
 async function submitScannedResult() {
@@ -738,3 +738,5 @@ async function submitScannedResult() {
     alert("Connection error: " + err);
   }
 }
+
+window.drawValidationOverlays = drawValidationOverlays;
