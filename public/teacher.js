@@ -419,22 +419,66 @@ function openImportModal() {
   new bootstrap.Modal(document.getElementById('import-students-modal')).show();
 }
 
+function parseCSVLine(text) {
+  const match = text.match(/(?:"[^"]*"|^[^,]*)(?:,(?:"[^"]*"|[^,]*))*/);
+  if (!match) return text.split(',');
+  const row = [];
+  let inQuotes = false;
+  let val = '';
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (char === '"') {
+      if (inQuotes && text[i+1] === '"') { val += '"'; i++; }
+      else { inQuotes = !inQuotes; }
+    } else if (char === ',' && !inQuotes) {
+      row.push(val.trim());
+      val = '';
+    } else {
+      val += char;
+    }
+  }
+  row.push(val.trim());
+  return row;
+}
+
 async function handleImportStudents(e) {
   e.preventDefault();
   const text = document.getElementById('import-csv-text').value.trim();
   if(!text) return alert("Please paste student data.");
 
-  const lines = text.split('\n');
+  const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  if(lines.length === 0) return alert("No valid text found.");
+
+  // Detect column delimiter based on first line
+  const delimiter = lines[0].includes('\t') ? '\t' : ',';
+  let headers = delimiter === '\t' ? lines[0].split('\t') : parseCSVLine(lines[0]);
+  
+  // Normalize headers
+  headers = headers.map(h => h.toLowerCase().replace(/[^a-z_]/g, ''));
+  
+  // Auto-detect column mapping
+  let idCol = headers.findIndex(h => h.includes('id'));
+  let emailCol = headers.findIndex(h => h.includes('email'));
+  let nameCol = headers.findIndex(h => h.includes('name'));
+  let sectionCol = headers.findIndex(h => h.includes('section') || h.includes('sec'));
+
+  // If no headers match exactly, fallback to ID, Name, Section, Email default
+  let hasHeaders = idCol >= 0 && nameCol >= 0;
+  if (!hasHeaders) {
+    idCol = 0; nameCol = 1; sectionCol = 2; emailCol = 3;
+  }
+
   const studentsList = [];
-  for(let line of lines) {
-    if(!line.trim()) continue;
-    const cols = line.includes('\t') ? line.split('\t') : line.split(',');
+  const startIdx = hasHeaders ? 1 : 0;
+
+  for(let i = startIdx; i < lines.length; i++) {
+    const cols = delimiter === '\t' ? lines[i].split('\t') : parseCSVLine(lines[i]);
     if(cols.length >= 2) {
       studentsList.push({
-        studentId: cols[0].trim(),
-        fullName: cols[1].trim(),
-        section: cols[2] ? cols[2].trim() : '',
-        email: cols[3] ? cols[3].trim() : ''
+        studentId: cols[idCol] ? cols[idCol].trim() : '',
+        fullName: cols[nameCol] ? cols[nameCol].trim() : '',
+        section: cols[sectionCol] ? cols[sectionCol].trim() : '',
+        email: cols[emailCol] ? cols[emailCol].trim() : ''
       });
     }
   }
