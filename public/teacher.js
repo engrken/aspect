@@ -9,6 +9,11 @@ let allStudentsList = [];
 let activeBuilderSet = 'A';
 let currentSubmissions = [];
 
+// NEW: Cache state to prevent redundant API calls
+let isRosterLoaded = false;
+let isSubmissionsLoaded = false;
+let isBuilderLoaded = false;
+
 async function callApi(payload) {
   try {
     const res = await fetch(API_BASE_URL, {
@@ -41,6 +46,17 @@ window.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('nav-id').innerText = `Faculty ID: ${auth.user.studentId}`;
   document.getElementById('nav-avatar').innerText = auth.user.fullName.charAt(0);
   document.getElementById('main-dashboard').style.display = 'block';
+
+  // Set up tab listeners to load data only when the tab is clicked, and only if not cached
+  document.getElementById('tab-enrollment-btn').addEventListener('show.bs.tab', () => {
+    if (!isRosterLoaded) loadSubjectEnrollment();
+  });
+  document.getElementById('tab-submissions-btn').addEventListener('show.bs.tab', () => {
+    if (!isSubmissionsLoaded) loadSubmissionsLedger();
+  });
+  document.getElementById('tab-builder-btn').addEventListener('show.bs.tab', () => {
+    if (!isBuilderLoaded) loadExamBuilder();
+  });
 
   await loadClasses();
 });
@@ -233,10 +249,19 @@ async function onActiveClassChange(classId) {
   localStorage.setItem('aspect_active_class', classId);
   document.getElementById('global-class-select').value = classId;
 
-  await Promise.all([
-    loadSubjectEnrollment(),
-    loadExamBuilderSilent()
-  ]);
+  // Reset cache flags so tabs reload fresh data for the new subject
+  isRosterLoaded = false;
+  isSubmissionsLoaded = false;
+  isBuilderLoaded = false;
+
+  // If the user is currently looking at a specific tab, load its data immediately
+  const activeTab = document.querySelector('.nav-link.active').getAttribute('data-bs-target');
+  if (activeTab === '#tab-enrollment') await loadSubjectEnrollment();
+  if (activeTab === '#tab-submissions') await loadSubmissionsLedger();
+  if (activeTab === '#tab-builder') await loadExamBuilder();
+
+  // Always pre-load the builder silently in the background for the scanner
+  loadExamBuilderSilent();
 
   if (typeof populateStudentSelect === 'function') {
     populateStudentSelect();
@@ -244,9 +269,10 @@ async function onActiveClassChange(classId) {
 }
 
 function selectClassAndGo(classId, tabTarget) {
-  onActiveClassChange(classId);
-  const btn = document.querySelector(`[data-bs-target="${tabTarget}"]`);
-  if (btn) btn.click();
+  onActiveClassChange(classId).then(() => {
+    const btn = document.querySelector(`[data-bs-target="${tabTarget}"]`);
+    if (btn) btn.click();
+  });
 }
 
 function generateBatchPersonalizedPDF() {
@@ -325,6 +351,7 @@ async function loadSubjectEnrollment() {
 
   enrolledStudentsList = res.enrolledStudents || [];
   allStudentsList = res.availableStudents || [];
+  isRosterLoaded = true; // Mark as cached
 
   const enrolledBadge = document.getElementById('enrolled-count-badge');
   if (enrolledBadge) enrolledBadge.innerText = `${enrolledStudentsList.length} Enrolled`;
@@ -449,20 +476,15 @@ async function handleImportStudents(e) {
   const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
   if(lines.length === 0) return alert("No valid text found.");
 
-  // Detect column delimiter based on first line
   const delimiter = lines[0].includes('\t') ? '\t' : ',';
   let headers = delimiter === '\t' ? lines[0].split('\t') : parseCSVLine(lines[0]);
-  
-  // Normalize headers
   headers = headers.map(h => h.toLowerCase().replace(/[^a-z_]/g, ''));
   
-  // Auto-detect column mapping
   let idCol = headers.findIndex(h => h.includes('id'));
   let emailCol = headers.findIndex(h => h.includes('email'));
   let nameCol = headers.findIndex(h => h.includes('name'));
   let sectionCol = headers.findIndex(h => h.includes('section') || h.includes('sec'));
 
-  // If no headers match exactly, fallback to ID, Name, Section, Email default
   let hasHeaders = idCol >= 0 && nameCol >= 0;
   if (!hasHeaders) {
     idCol = 0; nameCol = 1; sectionCol = 2; emailCol = 3;
@@ -520,6 +542,7 @@ async function loadExamBuilder() {
     document.getElementById('builder-class-heading').innerText = `${c.subjectCode}: Answer Key`;
     document.getElementById('builder-class-subheading').innerText = `Configuring ${builderItems.length} Examination Items`;
   }
+  isBuilderLoaded = true; // Mark as cached
   renderBuilderItems();
 }
 
@@ -661,6 +684,7 @@ async function loadSubmissionsLedger() {
   }
 
   currentSubmissions = res.submissions;
+  isSubmissionsLoaded = true; // Mark as cached
   let totalScore = 0, passedCount = 0, minScore = 9999, maxScore = -1;
 
   currentSubmissions.forEach(s => {
