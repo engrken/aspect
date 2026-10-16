@@ -474,12 +474,13 @@ function cleanQrPayload(raw) {
 
 function drawValidationOverlays(ctx, itemBreakdown) {
   if (!itemBreakdown || !Array.isArray(itemBreakdown)) return;
+  const isForm100 = itemBreakdown.length > 50;
   itemBreakdown.forEach(ib => {
     if (!ib.bubbles) return;
     ib.bubbles.forEach(b => {
       ctx.save();
       ctx.beginPath();
-      ctx.arc(b.x, b.y, b.r || 5.2, 0, 2 * Math.PI);
+      ctx.arc(b.x, b.y, b.r || (isForm100 ? 4.8 : 5.8), 0, 2 * Math.PI);
       if (b.state === 'correct') {
         ctx.strokeStyle = '#28a745';
         ctx.fillStyle = 'rgba(40, 167, 69, 0.28)';
@@ -684,7 +685,8 @@ async function evaluateWarpedExam100(testSet, keyItems) {
     totalPoints: res.totalPoints,
     percentage: res.percentage,
     isPassed: res.isPassed,
-    warpedBase64: res.warpedBase64 || base64Image
+    warpedBase64: res.warpedBase64 || base64Image,
+    itemBreakdown: res.itemBreakdown
   };
 
   if (activeStudentId) {
@@ -714,7 +716,8 @@ async function submitScannedResult() {
       testSet: lastScannedData.testSet,
       answers: lastScannedData.answers,
       items: builderItems,
-      warpedBase64: lastScannedData.warpedBase64
+      warpedBase64: lastScannedData.warpedBase64,
+      itemBreakdown: lastScannedData.itemBreakdown
     });
 
     btn.disabled = false;
@@ -735,3 +738,5 @@ async function submitScannedResult() {
     alert("Connection error: " + err);
   }
 }
+
+window.drawValidationOverlays = drawValidationOverlays;

@@ -91,14 +91,15 @@ class Submission(Base):
     is_passed = Column(Boolean)
     answers = Column(JSON)
     scanned_image = Column(String, default="")
+    item_breakdown = Column(JSON, default=[])
 
 def ensure_seeded(db):
     Base.metadata.create_all(bind=engine)
     try:
         db.execute(text("ALTER TABLE roster ADD COLUMN IF NOT EXISTS password_hash VARCHAR DEFAULT ''"))
+        db.execute(text("ALTER TABLE roster ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN DEFAULT FALSE"))
         db.execute(text("ALTER TABLE exam_submissions ADD COLUMN IF NOT EXISTS scanned_image TEXT DEFAULT ''"))
-        # SQLite doesn't natively support adding BOOLEAN DEFAULT FALSE elegantly via raw ALTER TABLE in all drivers, so we use integer 0
-        db.execute(text("ALTER TABLE roster ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN DEFAULT 0"))
+        db.execute(text("ALTER TABLE exam_submissions ADD COLUMN IF NOT EXISTS item_breakdown JSON"))
         db.commit()
     except Exception:
         db.rollback()

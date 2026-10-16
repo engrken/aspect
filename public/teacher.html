@@ -147,7 +147,6 @@
               <small class="text-body-secondary" id="enroll-subject-subheading">Registered students appear in the Available Roster below.</small>
             </div>
             <div class="d-flex gap-2">
-              <!-- NEW: Batch Import Students -->
               <button class="btn btn-outline-dark btn-sm fw-bold btn-touch" onclick="openImportModal()">
                 <i class="bi bi-file-earmark-spreadsheet me-1"></i> Import List
               </button>
@@ -581,8 +580,8 @@
         </div>
         <div class="modal-body">
           <div class="row g-3">
-            <div class="col-md-7 text-center bg-dark rounded d-flex align-items-center justify-content-center p-2" style="height: 65vh;">
-              <img id="review-image" src="" class="img-fluid rounded shadow-sm" style="max-height: 100%;" alt="No image captured">
+            <div class="col-md-7 text-center bg-dark rounded d-flex align-items-center justify-content-center p-2" style="height: 65vh; overflow-y: auto;">
+              <canvas id="review-canvas" class="rounded shadow-sm" style="max-width: 100%; height: auto;"></canvas>
             </div>
             <div class="col-md-5">
               <h5 class="fw-bold text-primary" id="review-student-name">Student Name</h5>
@@ -619,7 +618,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <script src="teacher.js"></script>
-  <script src="scanner.js"></script>
+  <script src="teacher.js?v=7"></script>
+  <script src="scanner.js?v=7"></script>
 </body>
 </html>

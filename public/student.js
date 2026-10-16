@@ -1,5 +1,5 @@
 /**
- * ASPECT — Password Authentication, Student Self-Registration & Results Controller
+ * ASPECT — Student Portal Controller (Profile, Auth, Results)
  */
 const API_BASE_URL = window.ASPECT_CONFIG?.API_URL || '/api';
 
@@ -7,6 +7,7 @@ let currentUser = null;
 let sessionToken = localStorage.getItem('aspect_token') || null;
 let authModal = null;
 let forcePasswordModal = null;
+let currentStudentResults = [];
 
 async function callApi(payload) {
   try {
@@ -250,6 +251,47 @@ async function registerStudent(e) {
   }
 }
 
+function openProfileModal() {
+  document.getElementById('prof-name').value = currentUser.fullName || '';
+  document.getElementById('prof-email').value = currentUser.email || '';
+  document.getElementById('prof-password').value = '';
+  new bootstrap.Modal(document.getElementById('profile-modal')).show();
+}
+
+async function updateProfile(e) {
+  e.preventDefault();
+  const fullName = document.getElementById('prof-name').value.trim();
+  const email = document.getElementById('prof-email').value.trim();
+  const password = document.getElementById('prof-password').value;
+
+  const btn = document.getElementById('btn-save-prof');
+  btn.disabled = true;
+  btn.innerHTML = 'Saving...';
+
+  const res = await callApi({
+    action: 'UPDATE_STUDENT_PROFILE',
+    sessionToken,
+    fullName,
+    email,
+    password
+  });
+
+  btn.disabled = false;
+  btn.innerHTML = 'Save Changes';
+
+  if (res.success) {
+    currentUser.fullName = fullName;
+    currentUser.email = email;
+    document.getElementById('profile-name').innerText = fullName;
+    document.getElementById('nav-name').innerText = fullName;
+    document.getElementById('nav-avatar').innerText = fullName.charAt(0);
+    bootstrap.Modal.getInstance(document.getElementById('profile-modal')).hide();
+    alert("Profile updated successfully!");
+  } else {
+    alert("Error updating profile: " + res.message);
+  }
+}
+
 function logout() {
   if (confirm("Sign out of your account?")) {
     localStorage.removeItem('aspect_token');
@@ -282,7 +324,8 @@ async function loadStudentResults() {
   try {
     const res = await callApi({ action: 'GET_STUDENT_RESULTS', sessionToken: sessionToken });
     if (res.success) {
-      renderResults(res.results);
+      currentStudentResults = res.results;
+      renderResults(currentStudentResults);
     } else {
       container.innerHTML = `<div class="col-12 alert alert-danger">${res.message}</div>`;
     }
@@ -341,7 +384,7 @@ function renderResults(results) {
           
           <div class="d-flex justify-content-between align-items-center text-secondary small">
             <span><i class="bi bi-clock-history me-1"></i>${item.timestamp}</span>
-            ${hasImage ? `<button class="btn btn-sm btn-outline-primary py-0" onclick="viewStudentSheet('${item.scannedImage}')"><i class="bi bi-camera"></i> View</button>` : ''}
+            ${hasImage ? `<button class="btn btn-sm btn-outline-primary py-0" onclick="viewStudentSheet(${item.id})"><i class="bi bi-camera"></i> View Sheet</button>` : ''}
           </div>
         </div>
       </div>
@@ -350,7 +393,53 @@ function renderResults(results) {
   });
 }
 
-function viewStudentSheet(base64Str) {
-  document.getElementById('student-scanned-img').src = "data:image/jpeg;base64," + base64Str;
-  new bootstrap.Modal(document.getElementById('view-sheet-modal')).show();
+function viewStudentSheet(subId) {
+  const item = currentStudentResults.find(r => r.id === subId);
+  if (!item || !item.scannedImage) return;
+
+  const canvas = document.getElementById('student-sheet-canvas');
+  const ctx = canvas.getContext('2d');
+  
+  const img = new Image();
+  img.onload = () => {
+    canvas.width = img.width;
+    canvas.height = img.height;
+    ctx.drawImage(img, 0, 0);
+    if (item.itemBreakdown) {
+      drawValidationOverlays(ctx, item.itemBreakdown);
+    }
+    new bootstrap.Modal(document.getElementById('view-sheet-modal')).show();
+  };
+  img.src = "data:image/jpeg;base64," + item.scannedImage;
+}
+
+function drawValidationOverlays(ctx, itemBreakdown) {
+  if (!itemBreakdown || !Array.isArray(itemBreakdown)) return;
+  const isForm100 = itemBreakdown.length > 50;
+  itemBreakdown.forEach(ib => {
+    if (!ib.bubbles) return;
+    ib.bubbles.forEach(b => {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r || (isForm100 ? 4.8 : 5.8), 0, 2 * Math.PI);
+      if (b.state === 'correct') {
+        ctx.strokeStyle = '#28a745';
+        ctx.fillStyle = 'rgba(40, 167, 69, 0.28)';
+        ctx.lineWidth = 2.0;
+        ctx.fill();
+        ctx.stroke();
+      } else if (b.state === 'wrong') {
+        ctx.strokeStyle = '#dc3545';
+        ctx.fillStyle = 'rgba(220, 53, 69, 0.28)';
+        ctx.lineWidth = 2.0;
+        ctx.fill();
+        ctx.stroke();
+      } else if (b.state === 'missed') {
+        ctx.strokeStyle = '#ffc107';
+        ctx.lineWidth = 1.8;
+        ctx.stroke();
+      }
+      ctx.restore();
+    });
+  });
 }

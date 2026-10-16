@@ -661,11 +661,22 @@ function openReviewModal(subId) {
   const activeClassObj = classList.find(cls => cls.classId === activeClassId);
   document.getElementById('review-class-pass-pct').value = activeClassObj ? activeClassObj.passingPercentage : 70;
 
-  const imgEl = document.getElementById('review-image');
+  const canvas = document.getElementById('review-canvas');
+  const ctx = canvas.getContext('2d');
+  
   if (sub.scannedImage) {
-    imgEl.src = "data:image/jpeg;base64," + sub.scannedImage;
+    const img = new Image();
+    img.onload = () => {
+      canvas.width = img.width;
+      canvas.height = img.height;
+      ctx.drawImage(img, 0, 0);
+      if (sub.itemBreakdown && typeof drawValidationOverlays === 'function') {
+        drawValidationOverlays(ctx, sub.itemBreakdown);
+      }
+    };
+    img.src = "data:image/jpeg;base64," + sub.scannedImage;
   } else {
-    imgEl.src = "";
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
   }
 
   new bootstrap.Modal(document.getElementById('review-modal')).show();

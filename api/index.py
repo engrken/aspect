@@ -39,6 +39,7 @@ class ApiPayload(BaseModel):
     base64Image: Optional[str] = None
     warpedBase64: Optional[str] = None
     answers: Optional[Dict[str, Any]] = None
+    itemBreakdown: Optional[List[Dict[str, Any]]] = None
     submissionId: Optional[int] = None
     rawScore: Optional[int] = None
     percentage: Optional[float] = None
@@ -175,7 +176,25 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                     "mustChangePassword": False
                 }
             }
-            
+
+        elif act == "UPDATE_STUDENT_PROFILE":
+            user = validate_token(db, payload.sessionToken)
+            if not user or user.role != "STUDENT":
+                return {"success": False, "message": "Unauthorized session."}
+
+            name = (payload.fullName or "").strip()
+            email = (payload.email or "").strip().lower()
+            pwd = (payload.password or "").strip()
+
+            if name: user.full_name = name
+            if email is not None: user.email = email
+            if pwd:
+                if len(pwd) < 6:
+                    return {"success": False, "message": "Password must be at least 6 characters."}
+                user.password_hash = hash_password(pwd)
+            db.commit()
+            return {"success": True, "message": "Profile updated."}
+
         elif act == "CHANGE_PASSWORD":
             user = validate_token(db, payload.sessionToken)
             if not user:
@@ -224,7 +243,8 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                     "percentage": f"{s.percentage}%",
                     "timestamp": s.timestamp.strftime("%Y-%m-%d %H:%M"),
                     "status": "PASSED" if s.is_passed else "FAILED",
-                    "scannedImage": s.scanned_image
+                    "scannedImage": s.scanned_image,
+                    "itemBreakdown": s.item_breakdown
                 })
             return {
                 "success": True,
@@ -377,7 +397,6 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                     existing.full_name = name
                     existing.section = sec
                     if email: existing.email = email
-                    # If they never logged in and set a password, ensure they get default with force reset
                     if not existing.password_hash:
                         existing.password_hash = default_hash
                         existing.must_change_password = True
@@ -469,6 +488,8 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                 existing_sub.answers = ans_map
                 if img_b64:
                     existing_sub.scanned_image = img_b64
+                if payload.itemBreakdown:
+                    existing_sub.item_breakdown = payload.itemBreakdown
             else:
                 db.add(Submission(
                     class_id=payload.classId,
@@ -481,7 +502,8 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                     percentage=pct,
                     is_passed=is_passed,
                     answers=ans_map,
-                    scanned_image=img_b64
+                    scanned_image=img_b64,
+                    item_breakdown=payload.itemBreakdown or []
                 ))
             db.commit()
             return {
@@ -523,7 +545,8 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                         "isPassed": s.is_passed,
                         "timestamp": s.timestamp.strftime("%Y-%m-%d %H:%M"),
                         "scannedImage": s.scanned_image,
-                        "answers": s.answers
+                        "answers": s.answers,
+                        "itemBreakdown": s.item_breakdown
                     } for s in subs
                 ]
             }
@@ -531,7 +554,6 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
         elif act == "GET_FACULTY":
             teachers = db.query(RosterUser).filter_by(role="TEACHER").order_by(RosterUser.student_id.asc()).all()
             return {"success": True, "faculty": [{"facultyId": t.student_id, "fullName": t.full_name, "email": t.email, "department": t.section} for t in teachers]}
-
         elif act == "REGISTER_FACULTY":
             fd = payload.facultyData or {}
             fid = (fd.get("facultyId") or "").strip().upper()
@@ -548,7 +570,6 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             db.add(RosterUser(student_id=fid, email=femail, full_name=fname, section=fdept, role="TEACHER", password_hash=hash_password(fpwd)))
             db.commit()
             return {"success": True, "message": "Faculty account registered."}
-
         elif act == "DELETE_FACULTY":
             target_id = (payload.facultyId or "").strip().upper()
             if target_id in ["FACULTY-01", user.student_id.upper()]: return {"success": False, "message": "Cannot delete admin or self."}
