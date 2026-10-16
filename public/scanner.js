@@ -1,6 +1,5 @@
 /**
- * ASPECT Engine — Optical Mark Recognition & Vision Pipeline
- * Outer-Quadrant Fiducial Lock + High-Res QR Decoder
+ * ASPECT Engine — Scanner & Image Capture (Optimized for Server-Side OpenCV)
  */
 
 let videoStream = null;
@@ -59,7 +58,7 @@ function matchAndDisplayStudent(studentId, isQrVerified) {
     if (card) card.className = 'p-2 mb-2 rounded border border-warning-subtle bg-warning-subtle d-flex align-items-center gap-2';
     if (avatar) { avatar.className = 'rounded-circle bg-warning text-dark fw-bold d-flex align-items-center justify-content-center flex-shrink-0'; avatar.innerText = 'ID'; }
     if (nameEl) nameEl.innerText = `Student ID: ${studentId}`;
-    if (metaEl) metaEl.innerText = 'Auto-detected from sheet (unlisted in section)';
+    if (metaEl) metaEl.innerText = 'Auto-detected from sheet';
     if (badge) { badge.className = 'badge bg-warning text-dark'; badge.innerText = isQrVerified ? 'QR DETECTED' : 'ID SET'; }
   }
 
@@ -80,7 +79,7 @@ async function initScanner() {
   }
 
   if (enrolledStudentsList.length === 0 && activeClassId) {
-    await loadSubjectEnrollment();
+    if (typeof loadSubjectEnrollment === 'function') await loadSubjectEnrollment();
   }
   populateStudentSelect();
 
@@ -141,7 +140,7 @@ function updateTargetUI(isLocked) {
 
   if (label) {
     if (isLocked) {
-      label.innerText = `Corners Locked! Capturing (${stableAlignmentCount}/${REQUIRED_STABLE_FRAMES})...`;
+      label.innerText = `Corners Locked! Evaluating...`;
       label.style.color = '#20c997';
     } else {
       label.innerText = "Fit all 4 outer corner black squares inside the frame";
@@ -178,7 +177,7 @@ function startAutoScanLoop() {
         stopAutoScanLoop();
         if (navigator.vibrate) navigator.vibrate(60);
         try {
-          await processCameraFrame(corners, probeH);
+          await processCameraFrame(corners);
         } catch (err) {
           console.error("Auto-scan error:", err);
           resetToLiveCamera();
@@ -220,14 +219,9 @@ function findFourCornersRobust(imgData, W, H) {
 
   const visited = new Uint8Array(W * H);
   const candidates = [];
-  const minSize = 8;
-  const maxSize = 36;
-
-  const qX = new Int32Array(3000);
-  const qY = new Int32Array(3000);
-
-  const startY = 6, endY = H - 6;
-  const startX = 6, endX = W - 6;
+  const minSize = 8, maxSize = 36;
+  const qX = new Int32Array(3000), qY = new Int32Array(3000);
+  const startY = 6, endY = H - 6, startX = 6, endX = W - 6;
 
   for (let sy = startY; sy < endY; sy += 2) {
     for (let sx = startX; sx < endX; sx += 2) {
@@ -236,10 +230,7 @@ function findFourCornersRobust(imgData, W, H) {
 
       const idx = vIdx * 4;
       const lum = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
-      if (lum >= darkThreshold) {
-        visited[vIdx] = 1;
-        continue;
-      }
+      if (lum >= darkThreshold) { visited[vIdx] = 1; continue; }
 
       let head = 0, tail = 0;
       qX[tail] = sx; qY[tail] = sy; tail++;
@@ -277,34 +268,12 @@ function findFourCornersRobust(imgData, W, H) {
 
       const bw = bMaxX - bMinX + 1;
       const bh = bMaxY - bMinY + 1;
-
       if (bw >= minSize && bw <= maxSize && bh >= minSize && bh <= maxSize) {
         const aspect = bw / bh;
         if (aspect >= 0.68 && aspect <= 1.45) {
           const areaRatio = count / (bw * bh);
           if (areaRatio >= 0.65) {
-            const pad = 5;
-            const sx0 = Math.max(0, bMinX - pad), sx1 = Math.min(W - 1, bMaxX + pad);
-            const sy0 = Math.max(0, bMinY - pad), sy1 = Math.min(H - 1, bMaxY + pad);
-            let surrSum = 0, surrCnt = 0;
-            for (let py = sy0; py <= sy1; py += 2) {
-              for (let px = sx0; px <= sx1; px += 2) {
-                if (px >= bMinX - 1 && px <= bMaxX + 1 && py >= bMinY - 1 && py <= bMaxY + 1) continue;
-                const pIdx = (py * W + px) * 4;
-                surrSum += 0.299 * data[pIdx] + 0.587 * data[pIdx + 1] + 0.114 * data[pIdx + 2];
-                surrCnt++;
-              }
-            }
-            const surrMean = surrCnt > 0 ? surrSum / surrCnt : 0;
-            if (surrMean > darkThreshold + 25) {
-              candidates.push({
-                x: sumX / count,
-                y: sumY / count,
-                bw,
-                bh,
-                size: (bw + bh) * 0.5
-              });
-            }
+            candidates.push({ x: sumX / count, y: sumY / count });
           }
         }
       }
@@ -325,11 +294,7 @@ function findFourCornersRobust(imgData, W, H) {
   blList.sort((a, b) => (a.x - a.y) - (b.x - b.y));
   brList.sort((a, b) => (b.x + b.y) - (a.x + a.y));
 
-  const tl = tlList[0];
-  const tr = trList[0];
-  const bl = blList[0];
-  const br = brList[0];
-
+  const tl = tlList[0], tr = trList[0], bl = blList[0], br = brList[0];
   const topW = Math.hypot(tr.x - tl.x, tr.y - tl.y);
   const botW = Math.hypot(br.x - bl.x, br.y - bl.y);
   const leftH = Math.hypot(bl.x - tl.x, bl.y - tl.y);
@@ -342,91 +307,6 @@ function findFourCornersRobust(imgData, W, H) {
   return { tl, tr, bl, br };
 }
 
-function warpPerspectiveToCanvas(srcImgData, corners, dstCtx, dstW, dstH) {
-  const src = [
-    corners.tl.x, corners.tl.y,
-    corners.tr.x, corners.tr.y,
-    corners.br.x, corners.br.y,
-    corners.bl.x, corners.bl.y
-  ];
-  const dst = [
-    12, 12,
-    dstW - 12, 12,
-    dstW - 12, dstH - 12,
-    12, dstH - 12
-  ];
-  const H_inv = getPerspectiveTransform(dst, src);
-
-  const dstImgData = dstCtx.createImageData(dstW, dstH);
-  const dstData = dstImgData.data;
-  const srcData = srcImgData.data;
-  const srcW = srcImgData.width;
-  const srcH = srcImgData.height;
-
-  for (let y = 0; y < dstH; y++) {
-    for (let x = 0; x < dstW; x++) {
-      const denominator = H_inv[6] * x + H_inv[7] * y + H_inv[8];
-      const sx = (H_inv[0] * x + H_inv[1] * y + H_inv[2]) / denominator;
-      const sy = (H_inv[3] * x + H_inv[4] * y + H_inv[5]) / denominator;
-      const dstIdx = (y * dstW + x) * 4;
-
-      if (sx >= 0 && sx < srcW - 1 && sy >= 0 && sy < srcH - 1) {
-        const x0 = Math.floor(sx), x1 = x0 + 1;
-        const y0 = Math.floor(sy), y1 = y0 + 1;
-        const dx = sx - x0, dy = sy - y0;
-
-        const idx00 = (y0 * srcW + x0) * 4;
-        const idx10 = (y0 * srcW + x1) * 4;
-        const idx01 = (y1 * srcW + x0) * 4;
-        const idx11 = (y1 * srcW + x1) * 4;
-
-        for (let c = 0; c < 3; c++) {
-          dstData[dstIdx + c] = (1 - dx) * (1 - dy) * srcData[idx00 + c] +
-                                dx * (1 - dy) * srcData[idx10 + c] +
-                                (1 - dx) * dy * srcData[idx01 + c] +
-                                dx * dy * srcData[idx11 + c];
-        }
-        dstData[dstIdx + 3] = 255;
-      } else {
-        dstData[dstIdx] = 255; dstData[dstIdx + 1] = 255; dstData[dstIdx + 2] = 255; dstData[dstIdx + 3] = 255;
-      }
-    }
-  }
-  dstCtx.putImageData(dstImgData, 0, 0);
-}
-
-function getPerspectiveTransform(src, dst) {
-  const a = [];
-  for (let i = 0; i < 4; i++) {
-    const sx = src[i * 2], sy = src[i * 2 + 1];
-    const dx = dst[i * 2], dy = dst[i * 2 + 1];
-    a.push([sx, sy, 1, 0, 0, 0, -dx * sx, -dx * sy, dx]);
-    a.push([0, 0, 0, sx, sy, 1, -dy * sx, -dy * sy, dy]);
-  }
-  for (let i = 0; i < 8; i++) {
-    let maxRow = i;
-    for (let k = i + 1; k < 8; k++) {
-      if (Math.abs(a[k][i]) > Math.abs(a[maxRow][i])) maxRow = k;
-    }
-    const temp = a[i]; a[i] = a[maxRow]; a[maxRow] = temp;
-    for (let k = i + 1; k < 8; k++) {
-      const c = -a[k][i] / a[i][i];
-      for (let j = i; j <= 8; j++) {
-        if (i === j) a[k][j] = 0;
-        else a[k][j] += c * a[i][j];
-      }
-    }
-  }
-  const h = new Array(9);
-  h[8] = 1;
-  for (let i = 7; i >= 0; i--) {
-    let sum = a[i][8];
-    for (let j = i + 1; j < 8; j++) sum -= a[i][j] * h[j];
-    h[i] = sum / a[i][i];
-  }
-  return h;
-}
-
 async function decodeStudentQRMultiStage(videoElement, rawCanvas) {
   if (nativeBarcodeDetector) {
     try {
@@ -434,29 +314,11 @@ async function decodeStudentQRMultiStage(videoElement, rawCanvas) {
       if (barcodes && barcodes.length > 0) return cleanQrPayload(barcodes[0].rawValue);
     } catch (e) {}
   }
-
   if (typeof jsQR !== "undefined" && rawCanvas) {
-    const rx = Math.floor(rawCanvas.width * 0.45);
-    const ry = 0;
-    const rw = rawCanvas.width - rx;
-    const rh = Math.floor(rawCanvas.height * 0.45);
-    const qrCropCanvas = document.createElement('canvas');
-    qrCropCanvas.width = rw;
-    qrCropCanvas.height = rh;
-    const qrCtx = qrCropCanvas.getContext('2d');
-    qrCtx.drawImage(rawCanvas, rx, ry, rw, rh, 0, 0, rw, rh);
-    const cropData = qrCtx.getImageData(0, 0, rw, rh);
-    let code = jsQR(cropData.data, rw, rh, { inversionAttempts: "attemptBoth" });
-    if (code && code.data) return cleanQrPayload(code.data);
-
-    const probeW = Math.min(rawCanvas.width, 1000);
-    const probeH = Math.round(probeW * (rawCanvas.height / rawCanvas.width));
-    const pCanvas = document.createElement('canvas');
-    pCanvas.width = probeW; pCanvas.height = probeH;
-    const pCtx = pCanvas.getContext('2d');
-    pCtx.drawImage(rawCanvas, 0, 0, probeW, probeH);
-    const imgData = pCtx.getImageData(0, 0, probeW, probeH);
-    code = jsQR(imgData.data, probeW, probeH, { inversionAttempts: "attemptBoth" });
+    const rx = Math.floor(rawCanvas.width * 0.45), ry = 0, rw = rawCanvas.width - rx, rh = Math.floor(rawCanvas.height * 0.45);
+    const qrCropCanvas = document.createElement('canvas'); qrCropCanvas.width = rw; qrCropCanvas.height = rh;
+    const qrCtx = qrCropCanvas.getContext('2d'); qrCtx.drawImage(rawCanvas, rx, ry, rw, rh, 0, 0, rw, rh);
+    let code = jsQR(qrCtx.getImageData(0, 0, rw, rh).data, rw, rh, { inversionAttempts: "attemptBoth" });
     if (code && code.data) return cleanQrPayload(code.data);
   }
   return null;
@@ -482,140 +344,82 @@ function drawValidationOverlays(ctx, itemBreakdown) {
       ctx.beginPath();
       ctx.arc(b.x, b.y, b.r || (isForm100 ? 4.8 : 5.8), 0, 2 * Math.PI);
       if (b.state === 'correct') {
-        ctx.strokeStyle = '#28a745';
-        ctx.fillStyle = 'rgba(40, 167, 69, 0.28)';
-        ctx.lineWidth = 2.0;
-        ctx.fill();
-        ctx.stroke();
+        ctx.strokeStyle = '#28a745'; ctx.fillStyle = 'rgba(40, 167, 69, 0.28)'; ctx.lineWidth = 2.0; ctx.fill(); ctx.stroke();
       } else if (b.state === 'wrong') {
-        ctx.strokeStyle = '#dc3545';
-        ctx.fillStyle = 'rgba(220, 53, 69, 0.28)';
-        ctx.lineWidth = 2.0;
-        ctx.fill();
-        ctx.stroke();
+        ctx.strokeStyle = '#dc3545'; ctx.fillStyle = 'rgba(220, 53, 69, 0.28)'; ctx.lineWidth = 2.0; ctx.fill(); ctx.stroke();
       } else if (b.state === 'missed') {
-        ctx.strokeStyle = '#ffc107';
-        ctx.lineWidth = 1.8;
-        ctx.stroke();
+        ctx.strokeStyle = '#ffc107'; ctx.lineWidth = 1.8; ctx.stroke();
       }
       ctx.restore();
     });
   });
 }
 
-async function processCameraFrame(preDetectedCorners = null, preProbeH = null) {
+async function processCameraFrame(preDetectedCorners = null) {
   stopAutoScanLoop();
 
   const video = document.getElementById('scanner-video');
   const displayCanvas = document.getElementById('scanner-canvas');
   if (!video.videoWidth) return alert("Camera is not ready yet.");
 
-  let keyItems = builderItems || [];
-  if (keyItems.length === 0) {
-    const res = await callApi({ action: 'GET_FULL_EXAM_CONFIG', sessionToken, classId: activeClassId });
-    if (res.success && res.items) {
-      keyItems = res.items;
-      builderItems = res.items;
-    }
+  // Pre-flight check: Prevent submitting if corners are not detected
+  let probeCorners = preDetectedCorners;
+  if (!probeCorners) {
+    const probeCanvas = document.createElement('canvas');
+    const probeH = Math.round(640 * (video.videoHeight / video.videoWidth));
+    probeCanvas.width = 640; probeCanvas.height = probeH;
+    const pCtx = probeCanvas.getContext('2d', { willReadFrequently: true });
+    pCtx.drawImage(video, 0, 0, 640, probeH);
+    probeCorners = findFourCornersRobust(pCtx.getImageData(0, 0, 640, probeH), 640, probeH);
   }
 
-  if (keyItems.length === 0) {
-    alert("No answer key configured for this subject.");
+  if (!probeCorners) {
+    alert("Alignment Failed: Could not detect the 4 black corner squares. Please ensure the paper is flat and fully visible inside the frame.");
     resetToLiveCamera();
     return;
   }
 
-  const probeH = preProbeH || Math.round(640 * (video.videoHeight / video.videoWidth));
-  let probeCorners = preDetectedCorners;
+  const btn = document.getElementById('btn-capture');
+  btn.disabled = true;
+  document.getElementById('scan-grade-display').innerHTML = '<span class="spinner-border spinner-border-sm text-primary me-2"></span> Evaluating with Python...';
 
-  if (!probeCorners) {
-    const probeCanvas = document.createElement('canvas');
-    probeCanvas.width = 640;
-    probeCanvas.height = probeH;
-    const pCtx = probeCanvas.getContext('2d');
-    pCtx.drawImage(video, 0, 0, 640, probeH);
-    const probeImg = pCtx.getImageData(0, 0, 640, probeH);
-    probeCorners = findFourCornersRobust(probeImg, 640, probeH);
+  // 1. Capture and downscale image for lightning-fast network transfer
+  const MAX_WIDTH = 1080;
+  let w = video.videoWidth;
+  let h = video.videoHeight;
+  if (w > MAX_WIDTH) {
+    h = Math.round((h * MAX_WIDTH) / w);
+    w = MAX_WIDTH;
   }
-
   const rawCanvas = document.createElement('canvas');
-  rawCanvas.width = video.videoWidth;
-  rawCanvas.height = video.videoHeight;
+  rawCanvas.width = w; rawCanvas.height = h;
   const rawCtx = rawCanvas.getContext('2d');
-  rawCtx.drawImage(video, 0, 0, rawCanvas.width, rawCanvas.height);
-  const rawImg = rawCtx.getImageData(0, 0, rawCanvas.width, rawCanvas.height);
+  rawCtx.drawImage(video, 0, 0, w, h);
 
+  // 2. Decode QR Code Locally
+  let activeStudentId = document.getElementById('scan-detected-id').value.trim();
   const qrResult = await decodeStudentQRMultiStage(video, rawCanvas);
   if (qrResult && qrResult.studentId) {
-    matchAndDisplayStudent(qrResult.studentId, true);
+    activeStudentId = qrResult.studentId;
+    matchAndDisplayStudent(activeStudentId, true);
   }
 
-  const isForm100 = keyItems.length > 50;
-  const CANON_W = 400;
-  const CANON_H = isForm100 ? 570 : 450;
-
-  displayCanvas.width = CANON_W;
-  displayCanvas.height = CANON_H;
-  const warpCtx = displayCanvas.getContext('2d');
-
-  if (probeCorners) {
-    const scaleX = video.videoWidth / 640;
-    const scaleY = video.videoHeight / probeH;
-    const corners = {
-      tl: { x: probeCorners.tl.x * scaleX, y: probeCorners.tl.y * scaleY },
-      tr: { x: probeCorners.tr.x * scaleX, y: probeCorners.tr.y * scaleY },
-      bl: { x: probeCorners.bl.x * scaleX, y: probeCorners.bl.y * scaleY },
-      br: { x: probeCorners.br.x * scaleX, y: probeCorners.br.y * scaleY }
-    };
-    warpPerspectiveToCanvas(rawImg, corners, warpCtx, CANON_W, CANON_H);
-    cachedWarpedData = warpCtx.getImageData(0, 0, CANON_W, CANON_H);
-  } else {
-    const sendW = 800;
-    const sendH = Math.round(800 * (video.videoHeight / video.videoWidth));
-    displayCanvas.width = sendW;
-    displayCanvas.height = sendH;
-    warpCtx.drawImage(video, 0, 0, sendW, sendH);
-    cachedWarpedData = warpCtx.getImageData(0, 0, sendW, sendH);
-  }
-
+  // 3. Heavy Image Compression (50% quality cuts file size by ~85%)
+  const compressedBase64 = rawCanvas.toDataURL('image/jpeg', 0.50);
   const activeSet = document.querySelector('input[name="scan_set"]:checked')?.value || 'A';
 
-  video.style.display = 'none';
-  displayCanvas.style.display = 'block';
-  document.getElementById('viewfinder-overlay').style.display = 'none';
-  document.getElementById('btn-retake').style.display = 'inline-block';
-
-  await evaluateWarpedExam100(activeSet, keyItems);
-}
-
-function onSetSelectorChange(newSet) {
-  if (cachedWarpedData) {
-    evaluateWarpedExam100(newSet, builderItems);
-  }
-}
-
-async function evaluateWarpedExam100(testSet, keyItems) {
-  if (!cachedWarpedData) return;
-  const displayCanvas = document.getElementById('scanner-canvas');
-  const warpCtx = displayCanvas.getContext('2d');
-  warpCtx.putImageData(cachedWarpedData, 0, 0);
-
-  const base64Image = displayCanvas.toDataURL('image/jpeg', 0.92);
-  let activeStudentId = document.getElementById('scan-detected-id').value.trim();
-
-  document.getElementById('scan-grade-display').innerHTML = `<span class="spinner-border spinner-border-sm text-primary"></span> Grading with OpenCV...`;
-
-  const payload = {
+  // 4. Send compressed image to backend OpenCV (Accurate grading)
+  const res = await callApi({
     action: 'AI_VISION_GRADE',
-    sessionToken: sessionToken,
+    sessionToken,
     classId: activeClassId,
     studentId: activeStudentId,
-    testSet: testSet,
-    items: keyItems,
-    base64Image: base64Image
-  };
+    testSet: activeSet,
+    base64Image: compressedBase64,
+    items: builderItems
+  });
 
-  const res = await callApi(payload);
+  btn.disabled = false;
 
   if (!res.success) {
     alert("Grading Error: " + res.message);
@@ -623,32 +427,22 @@ async function evaluateWarpedExam100(testSet, keyItems) {
     return;
   }
 
-  if (!activeStudentId && res.studentId) {
-    activeStudentId = res.studentId;
-    matchAndDisplayStudent(activeStudentId, true);
-  }
+  // 5. Render Python OpenCV's Pixel-Perfect Result
+  video.style.display = 'none';
+  displayCanvas.style.display = 'block';
+  document.getElementById('viewfinder-overlay').style.display = 'none';
+  document.getElementById('btn-retake').style.display = 'inline-block';
 
-  if (res.detectedSet) {
-    const radioEl = document.getElementById(res.detectedSet === 'B' ? 'scan_set_b' : 'scan_set_a');
-    if (radioEl) radioEl.checked = true;
-  }
-
-  if (res.warpedBase64) {
-    await new Promise((resolve) => {
-      const img = new Image();
-      img.onload = () => {
-        displayCanvas.width = img.width;
-        displayCanvas.height = img.height;
-        warpCtx.drawImage(img, 0, 0);
-        cachedWarpedData = warpCtx.getImageData(0, 0, img.width, img.height);
-        resolve();
-      };
-      img.onerror = resolve;
-      img.src = "data:image/jpeg;base64," + res.warpedBase64;
-    });
-  }
-
-  drawValidationOverlays(warpCtx, res.itemBreakdown);
+  // Draw the perfectly warped image returned by Python
+  const img = new Image();
+  img.onload = () => {
+    displayCanvas.width = img.width;
+    displayCanvas.height = img.height;
+    const warpCtx = displayCanvas.getContext('2d');
+    warpCtx.drawImage(img, 0, 0);
+    drawValidationOverlays(warpCtx, res.itemBreakdown); // Python's perfect coordinates
+  };
+  img.src = "data:image/jpeg;base64," + res.warpedBase64;
 
   document.getElementById('scan-score-display').innerText = `${res.rawScore} / ${res.totalPoints}`;
   document.getElementById('scan-grade-display').innerHTML = `
@@ -665,7 +459,7 @@ async function evaluateWarpedExam100(testSet, keyItems) {
     res.itemBreakdown.forEach(ib => {
       html += `<tr>
         <td>#${ib.itemNo}</td>
-        <td class="fw-bold">${ib.studentAnswer}</td>
+        <td class="fw-bold">${ib.studentAnswer || '-'}</td>
         <td class="text-primary fw-bold">${ib.correctAnswer}</td>
         <td class="${ib.isCorrect ? 'text-success fw-bold' : 'text-danger fw-bold'}">
           <i class="bi bi-${ib.isCorrect ? 'check-circle-fill' : 'x-circle-fill'}"></i>
@@ -678,24 +472,20 @@ async function evaluateWarpedExam100(testSet, keyItems) {
 
   lastScannedData = {
     classId: activeClassId,
-    studentId: activeStudentId,
-    testSet: res.detectedSet || testSet,
+    studentId: res.studentId || activeStudentId,
+    testSet: activeSet,
     answers: res.answers,
     rawScore: res.rawScore,
     totalPoints: res.totalPoints,
     percentage: res.percentage,
     isPassed: res.isPassed,
-    warpedBase64: res.warpedBase64 || base64Image,
+    warpedBase64: res.warpedBase64,
     itemBreakdown: res.itemBreakdown
   };
 
-  if (activeStudentId) {
+  if (lastScannedData.studentId) {
     document.getElementById('btn-save-scan').disabled = false;
   }
-}
-
-function evaluateWarpedExamPiecewise(testSet, keyItems) {
-  evaluateWarpedExam100(testSet, keyItems);
 }
 
 async function submitScannedResult() {
@@ -724,7 +514,6 @@ async function submitScannedResult() {
     btn.innerHTML = `<i class="bi bi-cloud-arrow-up-fill me-1"></i> Save Grade to Roster`;
 
     if (res.success) {
-      alert(`Grade recorded for ${res.fullName}!\nRaw: ${res.rawScore}/${res.totalPoints} (${res.percentage}% - ${res.status})`);
       document.getElementById('scan-detected-id').value = "";
       document.getElementById('scan-student-select').value = "";
       matchAndDisplayStudent('', false);
@@ -738,5 +527,3 @@ async function submitScannedResult() {
     alert("Connection error: " + err);
   }
 }
-
-window.drawValidationOverlays = drawValidationOverlays;
