@@ -95,37 +95,53 @@ class Submission(Base):
 
 def ensure_seeded(db):
     Base.metadata.create_all(bind=engine)
+    
+    # Run schema migrations individually so one error doesn't block the rest
+    migrations = [
+        "ALTER TABLE roster ADD COLUMN IF NOT EXISTS password_hash VARCHAR DEFAULT ''",
+        "ALTER TABLE roster ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE exam_submissions ADD COLUMN IF NOT EXISTS scanned_image TEXT DEFAULT ''",
+        "ALTER TABLE exam_submissions ADD COLUMN IF NOT EXISTS item_breakdown JSON"
+    ]
+    
+    for query in migrations:
+        try:
+            db.execute(text(query))
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            print(f"Migration skipped: {e}")
+
+    # Remove dummy students
     try:
-        db.execute(text("ALTER TABLE roster ADD COLUMN IF NOT EXISTS password_hash VARCHAR DEFAULT ''"))
-        db.execute(text("ALTER TABLE roster ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN DEFAULT FALSE"))
-        db.execute(text("ALTER TABLE exam_submissions ADD COLUMN IF NOT EXISTS scanned_image TEXT DEFAULT ''"))
-        db.execute(text("ALTER TABLE exam_submissions ADD COLUMN IF NOT EXISTS item_breakdown JSON"))
-        db.commit()
+        dummy_students = db.query(RosterUser).filter(RosterUser.full_name.like("Examinee Student %")).all()
+        if dummy_students:
+            for ds in dummy_students:
+                db.query(Enrollment).filter_by(student_id=ds.student_id).delete()
+                db.delete(ds)
+            db.commit()
     except Exception:
         db.rollback()
 
-    dummy_students = db.query(RosterUser).filter(RosterUser.full_name.like("Examinee Student %")).all()
-    if dummy_students:
-        for ds in dummy_students:
-            db.query(Enrollment).filter_by(student_id=ds.student_id).delete()
-            db.delete(ds)
-        db.commit()
-
-    faculty = db.query(RosterUser).filter_by(student_id="FACULTY-01").first()
-    if not faculty:
-        db.add(RosterUser(
-            student_id="FACULTY-01",
-            email="faculty@filamer.edu.ph",
-            full_name="System Administrator",
-            section="College of Engineering",
-            role="TEACHER",
-            password_hash=hash_password("admin123"),
-            must_change_password=False
-        ))
-        db.commit()
-    elif not faculty.password_hash:
-        faculty.password_hash = hash_password("admin123")
-        db.commit()
+    # Ensure FACULTY-01 exists
+    try:
+        faculty = db.query(RosterUser).filter_by(student_id="FACULTY-01").first()
+        if not faculty:
+            db.add(RosterUser(
+                student_id="FACULTY-01",
+                email="faculty@filamer.edu.ph",
+                full_name="System Administrator",
+                section="College of Engineering",
+                role="TEACHER",
+                password_hash=hash_password("admin123"),
+                must_change_password=False
+            ))
+            db.commit()
+        elif not faculty.password_hash:
+            faculty.password_hash = hash_password("admin123")
+            db.commit()
+    except Exception:
+        db.rollback()
 
 def get_db():
     db = SessionLocal()
