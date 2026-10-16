@@ -310,7 +310,7 @@ async function deleteClass(classId) {
   }
 }
 
-// --- ROSTER & ENROLLMENTS ---
+// --- ROSTER & ENROLLMENTS & BATCH IMPORT ---
 
 async function loadSubjectEnrollment() {
   if (!activeClassId) return;
@@ -359,7 +359,7 @@ function renderAvailableList() {
   tbody.innerHTML = '';
 
   if (allStudentsList.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="4" class="text-center py-4 text-body-secondary">No unassigned students found. Students will appear here once they self-register.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" class="text-center py-4 text-body-secondary">No unassigned students found. Students will appear here once they self-register or via Import.</td></tr>';
     return;
   }
 
@@ -411,6 +411,50 @@ async function unassignStudent(studentId) {
     await loadSubjectEnrollment();
   } else {
     alert("Error unassigning: " + res.message);
+  }
+}
+
+function openImportModal() {
+  document.getElementById('import-csv-text').value = '';
+  new bootstrap.Modal(document.getElementById('import-students-modal')).show();
+}
+
+async function handleImportStudents(e) {
+  e.preventDefault();
+  const text = document.getElementById('import-csv-text').value.trim();
+  if(!text) return alert("Please paste student data.");
+
+  const lines = text.split('\n');
+  const studentsList = [];
+  for(let line of lines) {
+    if(!line.trim()) continue;
+    const cols = line.includes('\t') ? line.split('\t') : line.split(',');
+    if(cols.length >= 2) {
+      studentsList.push({
+        studentId: cols[0].trim(),
+        fullName: cols[1].trim(),
+        section: cols[2] ? cols[2].trim() : '',
+        email: cols[3] ? cols[3].trim() : ''
+      });
+    }
+  }
+
+  if(studentsList.length === 0) return alert("No valid students parsed.");
+
+  const btn = document.getElementById('btn-import');
+  btn.disabled = true;
+  btn.innerHTML = 'Importing...';
+
+  const res = await callApi({ action: 'BATCH_IMPORT_STUDENTS', sessionToken, studentsList });
+  btn.disabled = false;
+  btn.innerHTML = 'Import Students';
+
+  if(res.success) {
+    bootstrap.Modal.getInstance(document.getElementById('import-students-modal')).hide();
+    alert(res.message);
+    await loadSubjectEnrollment();
+  } else {
+    alert("Error: " + res.message);
   }
 }
 

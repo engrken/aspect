@@ -41,6 +41,7 @@ class RosterUser(Base):
     section = Column(String, default="BS-ECE")
     role = Column(String, default="STUDENT")
     password_hash = Column(String, default="")
+    must_change_password = Column(Boolean, default=False)
 
 class AuthSession(Base):
     __tablename__ = "auth_sessions"
@@ -96,6 +97,8 @@ def ensure_seeded(db):
     try:
         db.execute(text("ALTER TABLE roster ADD COLUMN IF NOT EXISTS password_hash VARCHAR DEFAULT ''"))
         db.execute(text("ALTER TABLE exam_submissions ADD COLUMN IF NOT EXISTS scanned_image TEXT DEFAULT ''"))
+        # SQLite doesn't natively support adding BOOLEAN DEFAULT FALSE elegantly via raw ALTER TABLE in all drivers, so we use integer 0
+        db.execute(text("ALTER TABLE roster ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN DEFAULT 0"))
         db.commit()
     except Exception:
         db.rollback()
@@ -115,7 +118,8 @@ def ensure_seeded(db):
             full_name="System Administrator",
             section="College of Engineering",
             role="TEACHER",
-            password_hash=hash_password("admin123")
+            password_hash=hash_password("admin123"),
+            must_change_password=False
         ))
         db.commit()
     elif not faculty.password_hash:

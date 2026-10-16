@@ -44,6 +44,7 @@ class ApiPayload(BaseModel):
     percentage: Optional[float] = None
     isPassed: Optional[bool] = None
     studentIds: Optional[List[str]] = None
+    studentsList: Optional[List[Dict[str, Any]]] = None
 
 def validate_token(db: Session, token: Optional[str]):
     if not token:
@@ -80,7 +81,8 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                         full_name="System Administrator",
                         section="College of Engineering",
                         role="TEACHER",
-                        password_hash=hash_password("admin123")
+                        password_hash=hash_password("admin123"),
+                        must_change_password=False
                     )
                     db.add(user)
                     db.commit()
@@ -116,7 +118,8 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                     "email": user.email,
                     "fullName": user.full_name,
                     "section": user.section,
-                    "role": user.role
+                    "role": user.role,
+                    "mustChangePassword": bool(user.must_change_password)
                 }
             }
 
@@ -142,7 +145,8 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                 full_name=name,
                 section=sec,
                 role="STUDENT",
-                password_hash=hash_password(pwd)
+                password_hash=hash_password(pwd),
+                must_change_password=False
             )
             db.add(new_student)
 
@@ -167,9 +171,21 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                     "email": new_student.email,
                     "fullName": new_student.full_name,
                     "section": new_student.section,
-                    "role": new_student.role
+                    "role": new_student.role,
+                    "mustChangePassword": False
                 }
             }
+            
+        elif act == "CHANGE_PASSWORD":
+            user = validate_token(db, payload.sessionToken)
+            if not user:
+                return {"success": False, "message": "Unauthorized session."}
+            new_pw = (payload.newPassword or "").strip()
+            if len(new_pw) < 6: return {"success": False, "message": "Password must be at least 6 characters long."}
+            user.password_hash = hash_password(new_pw)
+            user.must_change_password = False
+            db.commit()
+            return {"success": True, "message": "Password updated successfully."}
 
         elif act == "VALIDATE_SESSION":
             user = validate_token(db, payload.sessionToken)
@@ -182,7 +198,8 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                     "email": user.email,
                     "fullName": user.full_name,
                     "section": user.section,
-                    "role": user.role
+                    "role": user.role,
+                    "mustChangePassword": bool(user.must_change_password)
                 }
             }
 
@@ -264,13 +281,6 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             db.commit()
             return {"success": True, "classId": cid}
 
-        elif act == "DELETE_CLASS":
-            db.query(CourseClass).filter_by(class_id=payload.classId).delete()
-            db.query(ExamItem).filter_by(class_id=payload.classId).delete()
-            db.query(Enrollment).filter_by(class_id=payload.classId).delete()
-            db.commit()
-            return {"success": True}
-
         elif act == "GET_FULL_EXAM_CONFIG":
             items = db.query(ExamItem).filter_by(class_id=payload.classId).order_by(ExamItem.item_no.asc()).all()
             return {
@@ -344,6 +354,49 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             db.query(Enrollment).filter_by(class_id=payload.classId, student_id=payload.studentId).delete()
             db.commit()
             return {"success": True}
+
+        elif act == "BATCH_IMPORT_STUDENTS":
+            st_list = payload.studentsList or []
+            if not st_list:
+                return {"success": False, "message": "No valid records provided."}
+            added, updated = 0, 0
+            default_pw = "student123"
+            default_hash = hash_password(default_pw)
+            classes = db.query(CourseClass).all()
+
+            for s in st_list:
+                sid = str(s.get("studentId", "")).strip().upper()
+                name = str(s.get("fullName", "")).strip()
+                sec = str(s.get("section", "BS-ECE")).strip().upper()
+                email = str(s.get("email", "")).strip().lower()
+
+                if not sid or not name: continue
+
+                existing = db.query(RosterUser).filter(RosterUser.student_id.ilike(sid)).first()
+                if existing:
+                    existing.full_name = name
+                    existing.section = sec
+                    if email: existing.email = email
+                    # If they never logged in and set a password, ensure they get default with force reset
+                    if not existing.password_hash:
+                        existing.password_hash = default_hash
+                        existing.must_change_password = True
+                    updated += 1
+                else:
+                    new_user = RosterUser(
+                        student_id=sid, email=email, full_name=name, section=sec,
+                        role="STUDENT", password_hash=default_hash, must_change_password=True
+                    )
+                    db.add(new_user)
+                    added += 1
+
+                for c in classes:
+                    if (c.default_section or "").strip().upper() == sec:
+                        enr = db.query(Enrollment).filter_by(class_id=c.class_id, student_id=sid).first()
+                        if not enr:
+                            db.add(Enrollment(class_id=c.class_id, student_id=sid))
+            db.commit()
+            return {"success": True, "message": f"Import complete: {added} new students added, {updated} updated. Default password is 'student123'."}
 
         elif act == "AI_VISION_GRADE":
             encoded = payload.base64Image.split(",")[1] if "," in payload.base64Image else payload.base64Image
@@ -475,10 +528,10 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                 ]
             }
 
-        # Keep Faculty Account logic (GET_FACULTY, REGISTER_FACULTY, DELETE_FACULTY, CHANGE_PASSWORD)
         elif act == "GET_FACULTY":
             teachers = db.query(RosterUser).filter_by(role="TEACHER").order_by(RosterUser.student_id.asc()).all()
             return {"success": True, "faculty": [{"facultyId": t.student_id, "fullName": t.full_name, "email": t.email, "department": t.section} for t in teachers]}
+
         elif act == "REGISTER_FACULTY":
             fd = payload.facultyData or {}
             fid = (fd.get("facultyId") or "").strip().upper()
@@ -495,18 +548,13 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             db.add(RosterUser(student_id=fid, email=femail, full_name=fname, section=fdept, role="TEACHER", password_hash=hash_password(fpwd)))
             db.commit()
             return {"success": True, "message": "Faculty account registered."}
+
         elif act == "DELETE_FACULTY":
             target_id = (payload.facultyId or "").strip().upper()
             if target_id in ["FACULTY-01", user.student_id.upper()]: return {"success": False, "message": "Cannot delete admin or self."}
             db.query(RosterUser).filter(RosterUser.student_id.ilike(target_id)).delete()
             db.commit()
             return {"success": True}
-        elif act == "CHANGE_PASSWORD":
-            new_pw = (payload.newPassword or "").strip()
-            if len(new_pw) < 6: return {"success": False, "message": "Password too short."}
-            user.password_hash = hash_password(new_pw)
-            db.commit()
-            return {"success": True, "message": "Password updated successfully."}
 
         return {"success": False, "message": f"Action '{act}' not supported."}
     except Exception as e:

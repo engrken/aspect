@@ -1,8 +1,12 @@
+/**
+ * ASPECT — Password Authentication, Student Self-Registration & Results Controller
+ */
 const API_BASE_URL = window.ASPECT_CONFIG?.API_URL || '/api';
 
 let currentUser = null;
 let sessionToken = localStorage.getItem('aspect_token') || null;
 let authModal = null;
+let forcePasswordModal = null;
 
 async function callApi(payload) {
   try {
@@ -82,11 +86,30 @@ function clearAuthAlert() {
   el.innerText = '';
 }
 
+function setForceAlert(message, type = 'danger') {
+  const el = document.getElementById('force-alert');
+  el.className = `alert alert-${type} py-1.5 px-2 small mb-3 text-center`;
+  el.innerText = message;
+  el.classList.remove('d-none');
+}
+
 function showGuestState() {
   document.getElementById('guest-view').style.display = 'block';
   document.getElementById('student-main').style.display = 'none';
   const dropdown = document.getElementById('nav-user-dropdown');
   if (dropdown) dropdown.classList.add('d-none');
+}
+
+function checkPasswordForce() {
+  if (currentUser && currentUser.mustChangePassword) {
+    showGuestState();
+    if (!forcePasswordModal) {
+      forcePasswordModal = new bootstrap.Modal(document.getElementById('force-password-modal'));
+    }
+    forcePasswordModal.show();
+    return true;
+  }
+  return false;
 }
 
 window.addEventListener('DOMContentLoaded', () => {
@@ -104,6 +127,7 @@ window.addEventListener('DOMContentLoaded', () => {
             return;
           }
           currentUser = res.user;
+          if (checkPasswordForce()) return;
           initStudentDashboard();
         } else {
           localStorage.removeItem('aspect_token');
@@ -145,6 +169,7 @@ async function loginWithPassword(e) {
       if (currentUser.role === 'TEACHER') {
         window.location.href = 'teacher.html';
       } else {
+        if (checkPasswordForce()) return;
         initStudentDashboard();
       }
     } else {
@@ -154,6 +179,28 @@ async function loginWithPassword(e) {
     btn.disabled = false;
     btn.innerHTML = `<i class="bi bi-box-arrow-in-right me-1"></i> Sign In`;
     setAuthAlert('Connection error while contacting server.');
+  }
+}
+
+async function submitForcedPassword(e) {
+  e.preventDefault();
+  const pwd = document.getElementById('force-new-pwd').value;
+  if (pwd.length < 6) return setForceAlert('Must be at least 6 characters.');
+  
+  const btn = document.getElementById('btn-force-pwd');
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Saving...`;
+
+  const res = await callApi({ action: 'CHANGE_PASSWORD', sessionToken, newPassword: pwd });
+  btn.disabled = false;
+  btn.innerHTML = `Save Password & Continue`;
+
+  if (res.success) {
+    currentUser.mustChangePassword = false;
+    if (forcePasswordModal) forcePasswordModal.hide();
+    initStudentDashboard();
+  } else {
+    setForceAlert(res.message);
   }
 }
 
