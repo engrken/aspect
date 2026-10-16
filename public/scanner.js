@@ -583,12 +583,21 @@ async function processCameraFrame(preDetectedCorners = null, preProbeH = null) {
 
   if (!probeCorners) {
     const probeCanvas = document.createElement('canvas'); probeCanvas.width = 640; probeCanvas.height = probeH;
-    const pCtx = probeCanvas.getContext('2d'); pCtx.drawImage(video, 0, 0, 640, probeH);
+    const pCtx = probeCanvas.getContext('2d', { willReadFrequently: true });
+    pCtx.drawImage(video, 0, 0, 640, probeH);
     probeCorners = findFourCornersRobust(pCtx.getImageData(0, 0, 640, probeH), 640, probeH);
   }
 
+  // THE FIX: Reject the scan if corners are still not found
+  if (!probeCorners) {
+    alert("Alignment Failed: Could not detect the 4 black corner squares. Please ensure the paper is flat, well-lit, and all 4 corners are visible inside the view.");
+    resetToLiveCamera();
+    return;
+  }
+
   const rawCanvas = document.createElement('canvas'); rawCanvas.width = video.videoWidth; rawCanvas.height = video.videoHeight;
-  const rawCtx = rawCanvas.getContext('2d'); rawCtx.drawImage(video, 0, 0, rawCanvas.width, rawCanvas.height);
+  const rawCtx = rawCanvas.getContext('2d', { willReadFrequently: true }); 
+  rawCtx.drawImage(video, 0, 0, rawCanvas.width, rawCanvas.height);
   const rawImg = rawCtx.getImageData(0, 0, rawCanvas.width, rawCanvas.height);
 
   // Decode QR locally
@@ -604,21 +613,17 @@ async function processCameraFrame(preDetectedCorners = null, preProbeH = null) {
   displayCanvas.width = 400; displayCanvas.height = isForm100 ? 570 : 450;
   const warpCtx = displayCanvas.getContext('2d', { willReadFrequently: true });
 
-  // Warp into place locally
-  if (probeCorners) {
-    const scaleX = video.videoWidth / 640, scaleY = video.videoHeight / probeH;
-    const corners = {
-      tl: { x: probeCorners.tl.x * scaleX, y: probeCorners.tl.y * scaleY },
-      tr: { x: probeCorners.tr.x * scaleX, y: probeCorners.tr.y * scaleY },
-      bl: { x: probeCorners.bl.x * scaleX, y: probeCorners.bl.y * scaleY },
-      br: { x: probeCorners.br.x * scaleX, y: probeCorners.br.y * scaleY }
-    };
-    warpPerspectiveToCanvas(rawImg, corners, warpCtx, displayCanvas.width, displayCanvas.height);
-    cachedWarpedData = warpCtx.getImageData(0, 0, displayCanvas.width, displayCanvas.height);
-  } else {
-    warpCtx.drawImage(video, 0, 0, displayCanvas.width, displayCanvas.height);
-    cachedWarpedData = warpCtx.getImageData(0, 0, displayCanvas.width, displayCanvas.height);
-  }
+  // Warp into place locally using the strict corners
+  const scaleX = video.videoWidth / 640, scaleY = video.videoHeight / probeH;
+  const corners = {
+    tl: { x: probeCorners.tl.x * scaleX, y: probeCorners.tl.y * scaleY },
+    tr: { x: probeCorners.tr.x * scaleX, y: probeCorners.tr.y * scaleY },
+    bl: { x: probeCorners.bl.x * scaleX, y: probeCorners.bl.y * scaleY },
+    br: { x: probeCorners.br.x * scaleX, y: probeCorners.br.y * scaleY }
+  };
+  
+  warpPerspectiveToCanvas(rawImg, corners, warpCtx, displayCanvas.width, displayCanvas.height);
+  cachedWarpedData = warpCtx.getImageData(0, 0, displayCanvas.width, displayCanvas.height);
 
   // --- LOCAL EVALUATION ---
   const activeSet = document.querySelector('input[name="scan_set"]:checked')?.value || 'A';
@@ -634,7 +639,7 @@ async function processCameraFrame(preDetectedCorners = null, preProbeH = null) {
   // Render Overlays directly on canvas
   drawValidationOverlays(warpCtx, result.itemBreakdown);
 
-  // Compress image to save bandwidth (30-40kb max)
+  // Compress image to save bandwidth
   const warpedBase64 = displayCanvas.toDataURL('image/jpeg', 0.60);
 
   // Hide Video, Show Graded Canvas
