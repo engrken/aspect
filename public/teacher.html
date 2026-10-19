@@ -15,8 +15,8 @@
     }
     .bubble-btn.active { background-color: var(--bs-primary) !important; color: #fff !important; border-color: var(--bs-primary) !important; }
     #scanner-container { position: relative; width: 100%; max-width: 580px; margin: 0 auto; background: #000; border-radius: 12px; overflow: hidden; }
-    #scanner-video { width: 100%; height: auto; display: block; }
-    #scanner-canvas { width: 100%; height: auto; display: none; }
+    #scanner-video { width: 100%; height: auto; display: block; object-fit: contain; }
+    #scanner-canvas { width: 100%; height: auto; display: none; object-fit: contain; }
     html, body { overflow-x: hidden; max-width: 100vw; -webkit-tap-highlight-color: transparent; }
     .nav-pills.mobile-scroll { display: flex; flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; padding-bottom: 4px; }
     .nav-pills.mobile-scroll::-webkit-scrollbar { display: none; }
@@ -286,9 +286,21 @@
               <button class="btn btn-outline-secondary btn-touch px-3" id="btn-retake" onclick="resetToLiveCamera()" style="display: none;">
                 <i class="bi bi-arrow-counterclockwise fs-5"></i> Retake
               </button>
-              <button class="btn btn-outline-secondary btn-touch px-3" onclick="restartCamera()">
+              <button class="btn btn-outline-secondary btn-touch px-3" onclick="restartCamera()" title="Switch cameras">
                 <i class="bi bi-arrow-repeat fs-5"></i>
               </button>
+            </div>
+            <div class="d-flex gap-2 mt-2 flex-wrap">
+              <input id="native-sheet-photo" type="file" accept="image/*" capture="environment" hidden onchange="onNativePhotoSelected(this)">
+              <button type="button" class="btn btn-outline-primary btn-sm" onclick="stopAutoScanLoop(); document.getElementById('native-sheet-photo').click()">
+                <i class="bi bi-phone me-1"></i> Phone Camera (Sharper Photo)
+              </button>
+              <button type="button" class="btn btn-outline-secondary btn-sm" id="btn-toggle-scan-photo" style="display:none" onclick="toggleScanPhoto()">
+                View Original Photo
+              </button>
+            </div>
+            <div class="small text-body-secondary mt-2" id="scanner-camera-info" aria-live="polite">
+              Hold the phone parallel to the page. For best detail, use Phone Camera.
             </div>
           </div>
 
@@ -633,6 +645,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="teacher.js?v=8"></script>
-  <script src="scanner.js?v=8"></script>
+  <script src="scanner.js?v=10"></script>
 </body>
 </html>

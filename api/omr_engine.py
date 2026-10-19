@@ -26,83 +26,156 @@ def decode_qr_opencv(gray_img):
         pass
     return None
 
+def _encode_preview(gray_img, original=None, source_corners=None, target_corners=None):
+    """Produce a sharp proof image using ORIGINAL camera pixels, not the 400px
+    image used for grade calculations. This preserves detail after the warp.
+    The scoring geometry must remain 400x450/570 for existing answer keys.
+    """
+    h, w = gray_img.shape
+    factor = 3
+    if original is not None and source_corners is not None and target_corners is not None:
+        dest = np.asarray(target_corners, dtype=np.float32) * factor
+        matrix = cv2.getPerspectiveTransform(np.asarray(source_corners, dtype=np.float32), dest)
+        proof = cv2.warpPerspective(
+            original, matrix, (w * factor, h * factor),
+            flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=255
+        )
+    else:
+        # A source image already at 400px cannot reveal more information.
+        # Upsampling here only ensures consistent overlay display sizing.
+        proof = cv2.resize(gray_img, (w * factor, h * factor), interpolation=cv2.INTER_CUBIC)
+    ok, buf = cv2.imencode('.jpg', proof, [int(cv2.IMWRITE_JPEG_QUALITY), 93])
+    if not ok:
+        raise ValueError('Could not encode aligned answer-sheet preview.')
+    return base64.b64encode(buf).decode('utf-8')
+
+
+def _ensure_readable(warped):
+    """Fail closed on a significantly defocused photo rather than grading
+    indistinguishable bubbles. Measured on the 400px canonical OMR grid.
+    """
+    content = warped[110:min(warped.shape[0] - 25, 425), 25:375]
+    if content.size == 0:
+        raise ValueError('Photo is too small to grade.')
+    sharpness = float(cv2.Laplacian(content, cv2.CV_64F).var())
+    if sharpness < 75.0:
+        raise ValueError(
+            'Captured photo is blurry. Hold the phone still, allow autofocus to '
+            'settle, use brighter even lighting, or choose Phone Camera to take '
+            'a sharp full-resolution photo. No grade was saved.'
+        )
+
+
+def _fiducials_match(warped, canon_h):
+    """Verify the SIX black printed registration marks, not just a quadrilateral."""
+    for x in (12, 388):
+        for y in (12, 334 if canon_h == 570 else 266, canon_h - 12):
+            # Interior square, deliberately clear of anti-aliased outside edges.
+            patch = warped[y - 3:y + 4, x - 3:x + 4]
+            if patch.size == 0 or float(np.mean(patch)) > 110:
+                return False
+    return True
+
+
 def auto_warp_sheet_opencv(gray_img, is_form_100=False):
+    """Rectify the printed sheet to its ORIGINAL 400x450 or 400x570 SVG grid.
+
+    The printed corner-mark CENTERS are (12,12), (388,12), (388,H-12),
+    (12,H-12). Mapping them to (0,0)...(400,H) moves every answer bubble.
+    Never silently resize a photo when the markers were not detected.
+    """
     H, W = gray_img.shape
     canon_w = 400
     canon_h = 570 if is_form_100 else 450
 
-    if W == canon_w and H in (450, 462, 570, 580):
-        if H != canon_h:
-            gray_img = cv2.resize(gray_img, (canon_w, canon_h))
-        return gray_img, None
+    if W == canon_w and H == canon_h and _fiducials_match(gray_img, canon_h):
+        _ensure_readable(gray_img)
+        return gray_img, _encode_preview(gray_img)
 
     min_lum = float(np.percentile(gray_img, 2))
     max_lum = float(np.percentile(gray_img, 98))
-    best_quad = None
+    if max_lum - min_lum < 30:
+        raise ValueError("Image lacks contrast. Use even lighting and a sharp photo.")
 
-    for factor in (0.28, 0.35, 0.42):
+    dst_pts = np.array([
+        [12, 12],
+        [388, 12],
+        [388, canon_h - 12],
+        [12, canon_h - 12],
+    ], dtype=np.float32)
+
+    for factor in (0.25, 0.32, 0.40, 0.48):
         thresh_val = int(min_lum + (max_lum - min_lum) * factor)
         _, binary = cv2.threshold(gray_img, thresh_val, 255, cv2.THRESH_BINARY_INV)
         num_labels, _, stats, centroids = cv2.connectedComponentsWithStats(binary)
 
         candidates = []
-        min_s = max(7, int(min(W, H) * 0.012))
-        max_s = max(40, int(min(W, H) * 0.08))
-
+        min_s = max(5, int(min(W, H) * 0.006))
+        max_s = max(35, int(min(W, H) * 0.08))
         for i in range(1, num_labels):
             x, y, bw, bh, area = stats[i]
-            if min_s <= bw <= max_s and min_s <= bh <= max_s:
-                aspect = bw / float(bh)
-                if 0.68 <= aspect <= 1.45:
-                    solidity = area / float(bw * bh)
-                    if solidity >= 0.65:
-                        cx, cy = centroids[i]
-                        candidates.append({'x': float(cx), 'y': float(cy)})
+            if not (min_s <= bw <= max_s and min_s <= bh <= max_s):
+                continue
+            if not (0.67 <= bw / float(bh) <= 1.48):
+                continue
+            if area / float(bw * bh) < 0.68:
+                continue
+            cx, cy = centroids[i]
+            candidates.append({'x': float(cx), 'y': float(cy)})
 
-        tl_list = [c for c in candidates if c['x'] < W * 0.35 and c['y'] < H * 0.35]
-        tr_list = [c for c in candidates if c['x'] > W * 0.65 and c['y'] < H * 0.35]
-        bl_list = [c for c in candidates if c['x'] < W * 0.35 and c['y'] > H * 0.65]
-        br_list = [c for c in candidates if c['x'] > W * 0.65 and c['y'] > H * 0.65]
+        tl_list = [c for c in candidates if c['x'] < W * 0.45 and c['y'] < H * 0.45]
+        tr_list = [c for c in candidates if c['x'] > W * 0.55 and c['y'] < H * 0.45]
+        bl_list = [c for c in candidates if c['x'] < W * 0.45 and c['y'] > H * 0.55]
+        br_list = [c for c in candidates if c['x'] > W * 0.55 and c['y'] > H * 0.55]
+        if not all([tl_list, tr_list, bl_list, br_list]):
+            continue
 
-        if tl_list and tr_list and bl_list and br_list:
-            tl = min(tl_list, key=lambda c: c['x'] + c['y'])
-            tr = max(tr_list, key=lambda c: c['x'] - c['y'])
-            bl = min(bl_list, key=lambda c: c['x'] - c['y'])
-            br = max(br_list, key=lambda c: c['x'] + c['y'])
+        # Sort extremes, then test combinations. A nearby printed character
+        # must not override a registration marker just because it is darker.
+        tl_candidates = sorted(tl_list, key=lambda c: c['x'] + c['y'])[:4]
+        tr_candidates = sorted(tr_list, key=lambda c: c['y'] - c['x'])[:4]
+        bl_candidates = sorted(bl_list, key=lambda c: c['x'] - c['y'])[:4]
+        br_candidates = sorted(br_list, key=lambda c: -c['x'] - c['y'])[:4]
 
-            top_w = float(np.hypot(tr['x'] - tl['x'], tr['y'] - tl['y']))
-            bot_w = float(np.hypot(br['x'] - bl['x'], br['y'] - bl['y']))
-            left_h = float(np.hypot(bl['x'] - tl['x'], bl['y'] - tl['y']))
-            right_h = float(np.hypot(br['x'] - tr['x'], br['y'] - tr['y']))
+        for tl in tl_candidates:
+            for tr in tr_candidates:
+                for bl in bl_candidates:
+                    for br in br_candidates:
+                        top_w = float(np.hypot(tr['x'] - tl['x'], tr['y'] - tl['y']))
+                        bot_w = float(np.hypot(br['x'] - bl['x'], br['y'] - bl['y']))
+                        left_h = float(np.hypot(bl['x'] - tl['x'], bl['y'] - tl['y']))
+                        right_h = float(np.hypot(br['x'] - tr['x'], br['y'] - tr['y']))
+                        if min(top_w, bot_w) < W * 0.12 or min(left_h, right_h) < H * 0.24:
+                            continue
+                        if abs(top_w - bot_w) / max(top_w, bot_w) > 0.34:
+                            continue
+                        if abs(left_h - right_h) / max(left_h, right_h) > 0.34:
+                            continue
 
-            if top_w > W * 0.50 and bot_w > W * 0.50 and left_h > H * 0.45 and right_h > H * 0.45:
-                if abs(top_w - bot_w) / max(top_w, bot_w) <= 0.20 and abs(left_h - right_h) / max(left_h, right_h) <= 0.20:
-                    best_quad = (tl, tr, br, bl)
-                    break
+                        shape_ratio = (top_w + bot_w) / max(1.0, left_h + right_h)
+                        expected_ratio = canon_w / canon_h
+                        if not (expected_ratio * 0.5 <= shape_ratio <= expected_ratio * 1.65):
+                            continue
 
-    if best_quad is not None:
-        tl, tr, br, bl = best_quad
-        src_pts = np.array([
-            [tl['x'], tl['y']],
-            [tr['x'], tr['y']],
-            [br['x'], br['y']],
-            [bl['x'], bl['y']]
-        ], dtype=np.float32)
-        dst_pts = np.array([
-            [0, 0],
-            [canon_w, 0],
-            [canon_w, canon_h],
-            [0, canon_h]
-        ], dtype=np.float32)
-        M = cv2.getPerspectiveTransform(src_pts, dst_pts)
-        warped = cv2.warpPerspective(gray_img, M, (canon_w, canon_h), borderValue=255)
-        _, buf = cv2.imencode('.jpg', warped, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-        warped_b64 = base64.b64encode(buf).decode('utf-8')
-        return warped, warped_b64
+                        src_pts = np.array([
+                            [tl['x'], tl['y']], [tr['x'], tr['y']],
+                            [br['x'], br['y']], [bl['x'], bl['y']]
+                        ], dtype=np.float32)
+                        matrix = cv2.getPerspectiveTransform(src_pts, dst_pts)
+                        warped = cv2.warpPerspective(
+                            gray_img, matrix, (canon_w, canon_h), borderValue=255
+                        )
+                        if _fiducials_match(warped, canon_h):
+                            _ensure_readable(warped)
+                            return warped, _encode_preview(
+                                warped, original=gray_img,
+                                source_corners=src_pts, target_corners=dst_pts
+                            )
 
-    resized = cv2.resize(gray_img, (canon_w, canon_h))
-    _, buf = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-    return resized, base64.b64encode(buf).decode('utf-8')
+    raise ValueError(
+        "Could not align answer sheet. Ensure all six black registration "
+        "squares are visible, the entire sheet is in frame, and lighting is even."
+    )
 
 def detect_shaded_test_set(blurred_img, default_set='A'):
     try:
@@ -240,7 +313,7 @@ def grade_sheet_opencv(image_bytes, items, test_set):
 
         if drop_from_lightest >= 18.0 and darkest['lum'] < 145.0:
             if separation < 9.0 and (lightest['lum'] - second_darkest['lum']) >= 18.0:
-                student_ans = f"{darkest['opt']},{second_darkest['opt']}"
+                student_ans = ",".join(sorted((darkest['opt'], second_darkest['opt'])))
                 is_double_shaded = True
             else:
                 student_ans = darkest['opt']
@@ -298,4 +371,4 @@ def grade_sheet_opencv(image_bytes, items, test_set):
             'bubbles': bubbles_overlay
         })
 
-    return detected_answers, raw_score, total_points, item_breakdown, detected_qr_id, warped_b64
+    return detected_answers, raw_score, total_points, item_breakdown, detected_qr_id, warped_b64, active_set
