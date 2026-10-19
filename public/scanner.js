@@ -6,15 +6,30 @@ let videoStream = null;
 let currentCameraFacing = 'environment';
 let lastScannedData = null;
 let cachedWarpedData = null;
+let lastCapturedDataUrl = null; // local-only; never written to the grade database
+let scannerView = 'corrected';
+let scannerRenderNonce = 0;
+let scannerStartedAt = 0;
+let priorStableCorners = null;
+
+// Browser video frames are often much lower-resolution than native phone photos.
+// Keep enough pixels for the printed answer bubbles and QR without huge uploads.
+const MAX_CAPTURE_EDGE = 2560;
+const CAPTURE_JPEG_QUALITY = 0.92;
+const AUTO_FOCUS_SETTLE_MS = 1800;
+const PROBE_WIDTH = 640;
+
 
 let autoScanInterval = null;
 let isScanningFrame = false;
 let stableAlignmentCount = 0;
-const REQUIRED_STABLE_FRAMES = 2;
+const REQUIRED_STABLE_FRAMES = 5;
 
-const nativeBarcodeDetector = ('BarcodeDetector' in window)
-  ? new BarcodeDetector({ formats: ['qr_code'] })
-  : null;
+let nativeBarcodeDetector = null;
+if ('BarcodeDetector' in window) {
+  try { nativeBarcodeDetector = new BarcodeDetector({ formats: ['qr_code'] }); }
+  catch (error) { console.warn('Native QR detection unavailable:', error); }
+}
 
 function populateStudentSelect() {
   const sel = document.getElementById('scan-student-select');
@@ -26,6 +41,17 @@ function populateStudentSelect() {
 function onStudentSelectChange(val) {
   document.getElementById('scan-detected-id').value = val;
   matchAndDisplayStudent(val, false);
+}
+
+// Called by the A / B radio controls in teacher.html.
+function onSetSelectorChange(set) {
+  if (lastScannedData && lastScannedData.testSet !== set) {
+    lastScannedData = null;
+    const btn = document.getElementById('btn-save-scan');
+    if (btn) btn.disabled = true;
+    const grade = document.getElementById('scan-grade-display');
+    if (grade) grade.innerText = 'Exam set changed. Retake the scan before saving.';
+  }
 }
 
 function matchAndDisplayStudent(studentId, isQrVerified) {
@@ -74,8 +100,10 @@ function matchAndDisplayStudent(studentId, isQrVerified) {
 
 async function initScanner() {
   const video = document.getElementById('scanner-video');
+  stopAutoScanLoop();
   if (videoStream) {
     videoStream.getTracks().forEach(track => track.stop());
+    videoStream = null;
   }
 
   if (enrolledStudentsList.length === 0 && activeClassId) {
@@ -83,19 +111,48 @@ async function initScanner() {
   }
   populateStudentSelect();
 
+  if (!navigator.mediaDevices?.getUserMedia) {
+    alert('Browser camera is unavailable. Use the Phone Camera button to take a photo instead.');
+    return;
+  }
+
   try {
-    videoStream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: currentCameraFacing },
-        width: { min: 720, ideal: 1280, max: 1920 },
-        height: { min: 480, ideal: 960, max: 1440 }
-      },
-      audio: false
-    });
+    // Ideal, not minimum/maximum: do not force phones into a low-resolution
+    // camera stream or a distorted aspect ratio.
+    try {
+      videoStream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: currentCameraFacing },
+          width: { ideal: 2560 },
+          height: { ideal: 1920 }
+        },
+        audio: false
+      });
+    } catch (highResError) {
+      // Some camera drivers reject the requested format; use device default.
+      videoStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: currentCameraFacing } }, audio: false
+      });
+    }
+
     video.srcObject = videoStream;
+    await video.play();
+    const track = videoStream.getVideoTracks()[0];
+    if (track && typeof track.getCapabilities === 'function' &&
+        typeof track.applyConstraints === 'function') {
+      try {
+        const caps = track.getCapabilities();
+        if (Array.isArray(caps.focusMode) && caps.focusMode.includes('continuous')) {
+          await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+        }
+      } catch (err) { console.info('Continuous autofocus not supported by this camera.'); }
+    }
+    const info = document.getElementById('scanner-camera-info');
+    if (info) info.innerText = `Live camera: ${video.videoWidth} × ${video.videoHeight}. Keep the phone steady and parallel to the page.`;
+    scannerStartedAt = performance.now();
     resetToLiveCamera();
   } catch (err) {
-    alert("Camera permission denied: " + err);
+    alert('Cannot open the camera: ' + (err?.message || err) + '. Try Phone Camera instead.');
   }
 }
 
@@ -115,6 +172,10 @@ function resetToLiveCamera() {
   if (canvas) canvas.style.display = 'none';
   if (overlay) overlay.style.display = 'block';
   if (retakeBtn) retakeBtn.style.display = 'none';
+  const toggle = document.getElementById('btn-toggle-scan-photo');
+  if (toggle) toggle.style.display = 'none';
+  const capture = document.getElementById('btn-capture');
+  if (capture) capture.disabled = false;
   if (saveBtn) saveBtn.disabled = true;
 
   document.getElementById('scan-score-display').innerText = '0 / 0';
@@ -125,6 +186,12 @@ function resetToLiveCamera() {
 
   lastScannedData = null;
   cachedWarpedData = null;
+  lastCapturedDataUrl = null;
+  scannerRenderNonce++;
+  scannerView = 'corrected';
+  const info = document.getElementById('scanner-camera-info');
+  if (info && video?.videoWidth) info.innerText =
+    `Live camera: ${video.videoWidth} × ${video.videoHeight}. Hold the phone parallel and steady.`;
   updateTargetUI(false);
   startAutoScanLoop();
 }
@@ -140,7 +207,7 @@ function updateTargetUI(isLocked) {
 
   if (label) {
     if (isLocked) {
-      label.innerText = `Corners Locked! Evaluating...`;
+      label.innerText = `Keep steady · ${stableAlignmentCount}/${REQUIRED_STABLE_FRAMES}`;
       label.style.color = '#20c997';
     } else {
       label.innerText = "Fit all 4 outer corner black squares inside the frame";
@@ -152,44 +219,46 @@ function updateTargetUI(isLocked) {
 function startAutoScanLoop() {
   stopAutoScanLoop();
   stableAlignmentCount = 0;
+  priorStableCorners = null;
 
   const probeCanvas = document.createElement('canvas');
-  probeCanvas.width = 640;
+  probeCanvas.width = PROBE_WIDTH;
   const probeCtx = probeCanvas.getContext('2d', { willReadFrequently: true });
 
   autoScanInterval = setInterval(async () => {
     const video = document.getElementById('scanner-video');
-    if (!video || !video.videoWidth || video.style.display === 'none' || isScanningFrame) return;
-
-    const probeH = Math.round(640 * (video.videoHeight / video.videoWidth));
+    if (!video || !video.videoWidth || video.readyState < 2 ||
+        video.style.display === 'none' || isScanningFrame || document.hidden) return;
+    const probeH = Math.round(PROBE_WIDTH * video.videoHeight / video.videoWidth);
     if (probeCanvas.height !== probeH) probeCanvas.height = probeH;
 
-    probeCtx.drawImage(video, 0, 0, 640, probeH);
-    const probeImg = probeCtx.getImageData(0, 0, 640, probeH);
-
-    const corners = findFourCornersRobust(probeImg, 640, probeH);
-
-    if (corners) {
-      stableAlignmentCount++;
+    probeCtx.drawImage(video, 0, 0, PROBE_WIDTH, probeH);
+    const probeImg = probeCtx.getImageData(0, 0, PROBE_WIDTH, probeH);
+    const corners = findFourCornersRobust(probeImg, PROBE_WIDTH, probeH);
+    // Do not fire the shutter as soon as a dark square appears: autofocus may
+    // still be hunting and the camera may be in motion.
+    if (corners && performance.now() - scannerStartedAt >= AUTO_FOCUS_SETTLE_MS) {
+      const stable = priorStableCorners && ['tl','tr','bl','br'].every(k =>
+        Math.hypot(corners[k].x - priorStableCorners[k].x,
+                   corners[k].y - priorStableCorners[k].y) < 9);
+      stableAlignmentCount = stable ? stableAlignmentCount + 1 : 1;
+      priorStableCorners = corners;
       updateTargetUI(true);
       if (stableAlignmentCount >= REQUIRED_STABLE_FRAMES) {
-        isScanningFrame = true;
         stopAutoScanLoop();
         if (navigator.vibrate) navigator.vibrate(60);
         try {
-          await processCameraFrame(corners);
+          await processCameraFrame();
         } catch (err) {
-          console.error("Auto-scan error:", err);
-          resetToLiveCamera();
-        } finally {
-          isScanningFrame = false;
+          console.error('Automatic scan failed:', err);
         }
       }
     } else {
       stableAlignmentCount = 0;
+      priorStableCorners = null;
       updateTargetUI(false);
     }
-  }, 150);
+  }, 300);
 }
 
 function stopAutoScanLoop() {
@@ -219,7 +288,7 @@ function findFourCornersRobust(imgData, W, H) {
 
   const visited = new Uint8Array(W * H);
   const candidates = [];
-  const minSize = 8, maxSize = 36;
+  const minSize = 5, maxSize = Math.max(36, Math.floor(Math.min(W, H) * 0.09));
   const qX = new Int32Array(3000), qY = new Int32Array(3000);
   const startY = 6, endY = H - 6, startX = 6, endX = W - 6;
 
@@ -300,25 +369,146 @@ function findFourCornersRobust(imgData, W, H) {
   const leftH = Math.hypot(bl.x - tl.x, bl.y - tl.y);
   const rightH = Math.hypot(br.x - tr.x, br.y - tr.y);
 
-  if (topW < W * 0.45 || botW < W * 0.45 || leftH < W * 0.40 || rightH < W * 0.40) return null;
+  if (topW < W * 0.12 || botW < W * 0.12 || leftH < H * 0.24 || rightH < H * 0.24) return null;
   if (Math.abs(topW - botW) / Math.max(topW, botW) > 0.18) return null;
   if (Math.abs(leftH - rightH) / Math.max(leftH, rightH) > 0.18) return null;
 
   return { tl, tr, bl, br };
 }
 
+/** Decode any native photo with orientation handled by the browser. */
+async function blobToDrawable(blob) {
+  if (typeof createImageBitmap === 'function') {
+    try { return await createImageBitmap(blob, { imageOrientation: 'from-image' }); }
+    catch (err) { /* Safari and older browsers accept fewer bitmap options. */ }
+    try { return await createImageBitmap(blob); } catch (err) {}
+  }
+  const url = URL.createObjectURL(blob);
+  try {
+    return await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('Phone could not decode this picture. Try a JPEG photograph.'));
+      img.src = url;
+    });
+  } finally {
+    // The decoded image is safe to draw after load, even when URL is revoked.
+    URL.revokeObjectURL(url);
+  }
+}
+
+function drawableToCanvas(drawable) {
+  const sourceW = drawable.videoWidth || drawable.naturalWidth || drawable.width;
+  const sourceH = drawable.videoHeight || drawable.naturalHeight || drawable.height;
+  if (!sourceW || !sourceH) throw new Error('Camera returned an empty image.');
+  const scale = Math.min(1, MAX_CAPTURE_EDGE / Math.max(sourceW, sourceH));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(sourceW * scale));
+  c.height = Math.max(1, Math.round(sourceH * scale));
+  const ctx = c.getContext('2d');
+  if (!ctx) throw new Error('Cannot create capture canvas.');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(drawable, 0, 0, c.width, c.height);
+  return c;
+}
+
+async function acquireSharpCameraFrame(video) {
+  const track = videoStream?.getVideoTracks()?.[0];
+  if (track && typeof ImageCapture !== 'undefined') {
+    try {
+      const camera = new ImageCapture(track);
+      const blob = await camera.takePhoto();
+      if (blob?.size) {
+        const bitmap = await blobToDrawable(blob);
+        try { return drawableToCanvas(bitmap); }
+        finally { if (typeof bitmap.close === 'function') bitmap.close(); }
+      }
+    } catch (err) {
+      console.warn('High-resolution still photo unavailable; using the live frame.', err);
+    }
+  }
+  // Unlike the old implementation, retain the full video frame, up to 2560px.
+  return drawableToCanvas(video);
+}
+
+async function onNativePhotoSelected(input) {
+  const file = input.files?.[0];
+  input.value = ''; // allow the same file to be selected again after a retake
+  if (!file) {
+    if (!lastScannedData) startAutoScanLoop();
+    return;
+  }
+  try {
+    const bitmap = await blobToDrawable(file);
+    let canvas;
+    try { canvas = drawableToCanvas(bitmap); }
+    finally { if (typeof bitmap.close === 'function') bitmap.close(); }
+    await processCameraFrame(null, canvas);
+  } catch (error) {
+    alert('Could not read the photo: ' + (error?.message || error));
+    resetToLiveCamera();
+  }
+}
+
+function toggleScanPhoto() {
+  if (!lastCapturedDataUrl || !cachedWarpedData) return;
+  scannerView = scannerView === 'corrected' ? 'original' : 'corrected';
+  renderScanPreview();
+}
+
+function renderScanPreview() {
+  const canvas = document.getElementById('scanner-canvas');
+  const toggle = document.getElementById('btn-toggle-scan-photo');
+  if (!canvas) return;
+  const original = scannerView === 'original';
+  const source = original ? lastCapturedDataUrl : cachedWarpedData;
+  if (!source) return;
+  const sequence = ++scannerRenderNonce;
+  const img = new Image();
+  img.onload = () => {
+    if (sequence !== scannerRenderNonce) return;
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    if (!original && lastScannedData?.itemBreakdown) {
+      ctx.save();
+      // OMR bubbles are in 400px canonical coordinates, while the sharp
+      // server preview is now larger. Scale only the colored overlays.
+      const sheetH = lastScannedData.itemBreakdown.length > 50 ? 570 : 450;
+      ctx.scale(img.naturalWidth / 400, img.naturalHeight / sheetH);
+      drawValidationOverlays(ctx, lastScannedData.itemBreakdown);
+      ctx.restore();
+    }
+  };
+  img.onerror = () => console.error('Cannot render the scanner preview.');
+  img.src = source;
+  if (toggle) {
+    toggle.style.display = 'inline-block';
+    toggle.innerText = original ? 'View Graded Sheet' : 'View Original Photo';
+  }
+}
+
 async function decodeStudentQRMultiStage(videoElement, rawCanvas) {
   if (nativeBarcodeDetector) {
     try {
-      const barcodes = await nativeBarcodeDetector.detect(videoElement);
+      const barcodes = await nativeBarcodeDetector.detect(rawCanvas || videoElement);
       if (barcodes && barcodes.length > 0) return cleanQrPayload(barcodes[0].rawValue);
     } catch (e) {}
   }
   if (typeof jsQR !== "undefined" && rawCanvas) {
     const rx = Math.floor(rawCanvas.width * 0.45), ry = 0, rw = rawCanvas.width - rx, rh = Math.floor(rawCanvas.height * 0.45);
-    const qrCropCanvas = document.createElement('canvas'); qrCropCanvas.width = rw; qrCropCanvas.height = rh;
-    const qrCtx = qrCropCanvas.getContext('2d'); qrCtx.drawImage(rawCanvas, rx, ry, rw, rh, 0, 0, rw, rh);
-    let code = jsQR(qrCtx.getImageData(0, 0, rw, rh).data, rw, rh, { inversionAttempts: "attemptBoth" });
+    // Scale the QR search image to keep browser decoding responsive even
+    // when the native phone camera supplies a 12MP image.
+    const fit = Math.min(1, 1000 / Math.max(rw, rh));
+    const qw = Math.max(1, Math.round(rw * fit));
+    const qh = Math.max(1, Math.round(rh * fit));
+    const qrCropCanvas = document.createElement('canvas');
+    qrCropCanvas.width = qw; qrCropCanvas.height = qh;
+    const qrCtx = qrCropCanvas.getContext('2d');
+    qrCtx.drawImage(rawCanvas, rx, ry, rw, rh, 0, 0, qw, qh);
+    let code = jsQR(qrCtx.getImageData(0, 0, qw, qh).data, qw, qh, { inversionAttempts: "attemptBoth" });
     if (code && code.data) return cleanQrPayload(code.data);
   }
   return null;
@@ -355,71 +545,66 @@ function drawValidationOverlays(ctx, itemBreakdown) {
   });
 }
 
-async function processCameraFrame(preDetectedCorners = null) {
+async function processCameraFrame(preDetectedCorners = null, suppliedCanvas = null) {
+  if (isScanningFrame) return;
+  isScanningFrame = true;
   stopAutoScanLoop();
 
   const video = document.getElementById('scanner-video');
   const displayCanvas = document.getElementById('scanner-canvas');
-  if (!video.videoWidth) return alert("Camera is not ready yet.");
+  const btn = document.getElementById('btn-capture');
+  btn.disabled = true;
+  document.getElementById('scan-grade-display').innerHTML =
+    '<span class="spinner-border spinner-border-sm text-primary me-2"></span> Capturing & evaluating...';
 
-  // Pre-flight check: Prevent submitting if corners are not detected
-  let probeCorners = preDetectedCorners;
-  if (!probeCorners) {
-    const probeCanvas = document.createElement('canvas');
-    const probeH = Math.round(640 * (video.videoHeight / video.videoWidth));
-    probeCanvas.width = 640; probeCanvas.height = probeH;
-    const pCtx = probeCanvas.getContext('2d', { willReadFrequently: true });
-    pCtx.drawImage(video, 0, 0, 640, probeH);
-    probeCorners = findFourCornersRobust(pCtx.getImageData(0, 0, 640, probeH), 640, probeH);
-  }
-
-  if (!probeCorners) {
-    alert("Alignment Failed: Could not detect the 4 black corner squares. Please ensure the paper is flat and fully visible inside the frame.");
+  let rawCanvas, activeStudentId, activeSet, compressedBase64, qrResult;
+  try {
+    if (!suppliedCanvas && (!video.videoWidth || video.readyState < 2)) {
+      throw new Error('Camera is not ready. Use Phone Camera for a sharper still photo.');
+    }
+    rawCanvas = suppliedCanvas || await acquireSharpCameraFrame(video);
+    // Store exactly the pixels we send to OpenCV so staff can review
+    // the original photograph as well as the perspective-corrected preview.
+    compressedBase64 = rawCanvas.toDataURL('image/jpeg', CAPTURE_JPEG_QUALITY);
+    if (compressedBase64 === 'data:,') throw new Error('Image encoding failed.');
+    lastCapturedDataUrl = compressedBase64;
+    activeStudentId = document.getElementById('scan-detected-id').value.trim();
+    qrResult = await decodeStudentQRMultiStage(suppliedCanvas ? null : video, rawCanvas);
+    if (qrResult?.studentId) {
+      activeStudentId = qrResult.studentId;
+      matchAndDisplayStudent(activeStudentId, true);
+    }
+    activeSet = document.querySelector('input[name="scan_set"]:checked')?.value || 'A';
+  } catch (err) {
+    btn.disabled = false;
+    isScanningFrame = false;
+    alert('Capture error: ' + (err?.message || err));
     resetToLiveCamera();
     return;
   }
 
-  const btn = document.getElementById('btn-capture');
-  btn.disabled = true;
-  document.getElementById('scan-grade-display').innerHTML = '<span class="spinner-border spinner-border-sm text-primary me-2"></span> Evaluating with Python...';
-
-  // 1. Capture and downscale image for lightning-fast network transfer
-  const MAX_WIDTH = 1080;
-  let w = video.videoWidth;
-  let h = video.videoHeight;
-  if (w > MAX_WIDTH) {
-    h = Math.round((h * MAX_WIDTH) / w);
-    w = MAX_WIDTH;
+  // 4. Submit the full-detail JPEG to OpenCV.
+  let res;
+  try {
+    res = await callApi({
+      action: 'AI_VISION_GRADE',
+      sessionToken,
+      classId: activeClassId,
+      studentId: activeStudentId,
+      testSet: activeSet,
+      base64Image: compressedBase64,
+      items: builderItems
+    });
+  } catch (error) {
+    btn.disabled = false;
+    isScanningFrame = false;
+    alert('Scan connection error: ' + (error?.message || String(error)));
+    resetToLiveCamera();
+    return;
   }
-  const rawCanvas = document.createElement('canvas');
-  rawCanvas.width = w; rawCanvas.height = h;
-  const rawCtx = rawCanvas.getContext('2d');
-  rawCtx.drawImage(video, 0, 0, w, h);
-
-  // 2. Decode QR Code Locally
-  let activeStudentId = document.getElementById('scan-detected-id').value.trim();
-  const qrResult = await decodeStudentQRMultiStage(video, rawCanvas);
-  if (qrResult && qrResult.studentId) {
-    activeStudentId = qrResult.studentId;
-    matchAndDisplayStudent(activeStudentId, true);
-  }
-
-  // 3. Heavy Image Compression (50% quality cuts file size by ~85%)
-  const compressedBase64 = rawCanvas.toDataURL('image/jpeg', 0.50);
-  const activeSet = document.querySelector('input[name="scan_set"]:checked')?.value || 'A';
-
-  // 4. Send compressed image to backend OpenCV (Accurate grading)
-  const res = await callApi({
-    action: 'AI_VISION_GRADE',
-    sessionToken,
-    classId: activeClassId,
-    studentId: activeStudentId,
-    testSet: activeSet,
-    base64Image: compressedBase64,
-    items: builderItems
-  });
 
   btn.disabled = false;
+  isScanningFrame = false;
 
   if (!res.success) {
     alert("Grading Error: " + res.message);
@@ -427,22 +612,21 @@ async function processCameraFrame(preDetectedCorners = null) {
     return;
   }
 
-  // 5. Render Python OpenCV's Pixel-Perfect Result
+  // 5. Render full-detail rectified preview, or toggle to original photo.
   video.style.display = 'none';
   displayCanvas.style.display = 'block';
   document.getElementById('viewfinder-overlay').style.display = 'none';
   document.getElementById('btn-retake').style.display = 'inline-block';
+  cachedWarpedData = res.warpedBase64 ? 'data:image/jpeg;base64,' + res.warpedBase64 : null;
+  scannerView = 'corrected';
 
-  // Draw the perfectly warped image returned by Python
-  const img = new Image();
-  img.onload = () => {
-    displayCanvas.width = img.width;
-    displayCanvas.height = img.height;
-    const warpCtx = displayCanvas.getContext('2d');
-    warpCtx.drawImage(img, 0, 0);
-    drawValidationOverlays(warpCtx, res.itemBreakdown); // Python's perfect coordinates
-  };
-  img.src = "data:image/jpeg;base64," + res.warpedBase64;
+  const gradedSet = res.detectedTestSet || activeSet;
+  const gradedSetRadio = document.querySelector(`input[name="scan_set"][value="${gradedSet}"]`);
+  if (gradedSetRadio) gradedSetRadio.checked = true;
+  if (res.studentId) {
+    const qrMatches = !!qrResult && String(qrResult.studentId).toUpperCase() === String(res.studentId).toUpperCase();
+    matchAndDisplayStudent(res.studentId, qrMatches);
+  }
 
   document.getElementById('scan-score-display').innerText = `${res.rawScore} / ${res.totalPoints}`;
   document.getElementById('scan-grade-display').innerHTML = `
@@ -473,7 +657,7 @@ async function processCameraFrame(preDetectedCorners = null) {
   lastScannedData = {
     classId: activeClassId,
     studentId: res.studentId || activeStudentId,
-    testSet: activeSet,
+    testSet: gradedSet,
     answers: res.answers,
     rawScore: res.rawScore,
     totalPoints: res.totalPoints,
@@ -483,6 +667,10 @@ async function processCameraFrame(preDetectedCorners = null) {
     itemBreakdown: res.itemBreakdown
   };
 
+  renderScanPreview();
+  const cameraInfo = document.getElementById('scanner-camera-info');
+  if (cameraInfo) cameraInfo.innerText =
+    `Captured: ${rawCanvas.width} × ${rawCanvas.height} · Graded sheet aligned by OpenCV. Review both views before saving.`;
   if (lastScannedData.studentId) {
     document.getElementById('btn-save-scan').disabled = false;
   }
