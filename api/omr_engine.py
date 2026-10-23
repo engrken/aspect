@@ -69,7 +69,7 @@ def _ensure_readable(warped):
 def _fiducial_is_dark(warped, x, y):
     """Require a dark marker relative to its local paper, allowing soft shadows."""
     h, w = warped.shape
-    if x - 15 < 0 or y - 15 < 0 or x + 15 >= w or y + 15 >= h:
+    if x - 3 < 0 or y - 3 < 0 or x + 3 >= w or y + 3 >= h:
         return False
 
     core = warped[y - 3:y + 4, x - 3:x + 4]
@@ -81,7 +81,8 @@ def _fiducial_is_dark(warped, x, y):
 
     # Black ink can appear gray in phone photos with local shadows/exposure.
     # The surrounding area must still be noticeably lighter than the mark.
-    surround = warped[y - 15:y + 16, x - 15:x + 16]
+    surround = warped[max(0, y - 15):min(h, y + 16),
+                      max(0, x - 15):min(w, x + 16)]
     paper_lum = float(np.percentile(surround, 75))
     return core_lum <= 170.0 and paper_lum - core_lum >= 36.0
 
