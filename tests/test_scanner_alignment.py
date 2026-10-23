@@ -132,6 +132,40 @@ class AlignmentTests(unittest.TestCase):
                 self.assertEqual(score, 0)
                 self.assertLess(np.mean(preview[24:48, 24:48]), 175)
 
+    def test_legacy_middle_markers_on_existing_printed_sheets(self):
+        """Earlier printouts use Y=225/285 rather than Y=266/334 for mid marks."""
+        for count in (50, 100):
+            with self.subTest(count=count):
+                image = self.sheet(count)
+                old_mid = 266 if count == 50 else 334
+                legacy_mid = 225 if count == 50 else 285
+                for x in (12, 388):
+                    # Only change the printed registration squares, NOT bubble
+                    # locations, to match the answer sheets already in use.
+                    cv2.rectangle(image, (x - 8, old_mid - 8),
+                                  (x + 8, old_mid + 8), 255, -1)
+                    cv2.rectangle(image, (x - 7, legacy_mid - 7),
+                                  (x + 6, legacy_mid + 6), 0, -1)
+                for item_no, option in enumerate('ABCD', start=1):
+                    self.mark(image, count, option, item_no=item_no)
+                key = [dict(itemNo=i, setA='ABCD'[(i - 1) % 4],
+                            setB='ABCD'[(i - 1) % 4], points=1, type='MCQ')
+                       for i in range(1, count + 1)]
+                answers, score, total, breakdown, _, preview, _ = grade_sheet_opencv(
+                    encoded(make_photo(image, count)), key, 'A'
+                )
+                self.assertEqual((score, total), (4, count))
+                self.assertEqual([b['studentAnswer'] for b in breakdown[:4]], list('ABCD'))
+                self.assertTrue(preview)
+
+    def test_mixed_middle_marker_positions_are_rejected(self):
+        """Do not accept a sheet with only one correctly placed middle mark."""
+        image = self.sheet(100)
+        cv2.rectangle(image, (4, 325), (20, 343), 255, -1)
+        cv2.rectangle(image, (5, 278), (18, 291), 0, -1)
+        with self.assertRaisesRegex(ValueError, 'Could not align answer sheet'):
+            grade_sheet_opencv(encoded(make_photo(image, 100)), items(100), 'A')
+
     def test_missing_corner_raises_error(self):
         for count in (50, 100):
             with self.subTest(count=count):
