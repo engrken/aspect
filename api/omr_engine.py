@@ -66,15 +66,45 @@ def _ensure_readable(warped):
         )
 
 
+def _fiducial_is_dark(warped, x, y):
+    """Require a dark marker relative to its local paper, allowing soft shadows."""
+    h, w = warped.shape
+    if x - 15 < 0 or y - 15 < 0 or x + 15 >= w or y + 15 >= h:
+        return False
+
+    core = warped[y - 3:y + 4, x - 3:x + 4]
+    if core.shape != (7, 7):
+        return False
+    core_lum = float(np.mean(core))
+    if core_lum <= 110.0:
+        return True
+
+    # Black ink can appear gray in phone photos with local shadows/exposure.
+    # The surrounding area must still be noticeably lighter than the mark.
+    surround = warped[y - 15:y + 16, x - 15:x + 16]
+    paper_lum = float(np.percentile(surround, 75))
+    return core_lum <= 170.0 and paper_lum - core_lum >= 36.0
+
+
 def _fiducials_match(warped, canon_h):
-    """Verify the SIX black printed registration marks, not just a quadrilateral."""
+    """Confirm all SIX marks for either current or previously printed sheets.
+
+    Earlier ASPECT templates positioned the middle row halfway down the SVG
+    (Y=225 for F50, Y=285 for F100). Current templates use Y=266/334.
+    Only the mark position differs; the four corners and bubble grid are
+    unchanged. Require BOTH middle marks to use the same known layout so an
+    unrelated dark shape cannot be mistaken for a valid answer sheet.
+    """
     for x in (12, 388):
-        for y in (12, 334 if canon_h == 570 else 266, canon_h - 12):
-            # Interior square, deliberately clear of anti-aliased outside edges.
-            patch = warped[y - 3:y + 4, x - 3:x + 4]
-            if patch.size == 0 or float(np.mean(patch)) > 110:
+        for y in (12, canon_h - 12):
+            if not _fiducial_is_dark(warped, x, y):
                 return False
-    return True
+
+    middle_options = (334, 285) if canon_h == 570 else (266, 225)
+    return any(
+        all(_fiducial_is_dark(warped, x, mid_y) for x in (12, 388))
+        for mid_y in middle_options
+    )
 
 
 def auto_warp_sheet_opencv(gray_img, is_form_100=False):
