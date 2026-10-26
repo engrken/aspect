@@ -106,8 +106,11 @@ def save_scanner_grade(db, class_id, student, test_set, answers, image,
                        origin_scan_id=""):
     """Single serialized grade write. Never overwrite silently, including on retries."""
     sid = canonical_student_id(student.student_id)
-    db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
-               {"key": f"ASPECT:{class_id}:{sid}"})
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+                   {"key": f"ASPECT:{class_id}:{sid}"})
+    # Local SQLite still honors the duplicate lookup, but cannot provide the
+    # PostgreSQL transaction-level advisory lock used by production.
     existing = db.query(Submission).filter(
         Submission.class_id == class_id,
         Submission.student_id.ilike(sid)
