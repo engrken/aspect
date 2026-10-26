@@ -56,6 +56,7 @@ class ApiPayload(BaseModel):
     studentIds: Optional[List[str]] = None
     studentsList: Optional[List[Dict[str, Any]]] = None
     batchMode: bool = False
+    batchId: Optional[str] = None
     clientQrId: Optional[str] = None
     scanId: Optional[str] = None
     allowOverwrite: bool = False
@@ -584,6 +585,7 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                 scan_id = str(uuid.uuid4())
                 db.add(ScannerReview(
                     id=scan_id, class_id=payload.classId, teacher_id=user.student_id,
+                    batch_id=(payload.batchId or "")[:80],
                     student_id=qr_id, detected_qr_id=qr_id,
                     test_set=detected_set, status="PENDING",
                     reasons=reasons, answers=detected_answers,
@@ -672,6 +674,32 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                  "createdAt": j.created_at.strftime("%Y-%m-%d %H:%M:%S")}
                 for j in jobs
             ]}
+
+        elif act == "GET_SCAN_BATCH_REPORT":
+            if not can_scan_class(db, user, payload.classId):
+                return {"success": False, "message": "Class not found or not assigned to you."}
+            if not payload.batchId:
+                return {"success": False, "message": "A batch session is required."}
+            records = db.query(ScannerReview).filter_by(
+                class_id=payload.classId,
+                teacher_id=user.student_id,
+                batch_id=payload.batchId
+            ).order_by(ScannerReview.created_at.asc()).limit(1000).all()
+            summary = {"saved": 0, "pending": 0, "dismissed": 0}
+            for j in records:
+                status = j.status.lower()
+                if status in summary:
+                    summary[status] += 1
+            return {"success": True, "batchId": payload.batchId, "summary": summary,
+                    "records": [
+                        {"scanId": j.id, "studentId": j.student_id,
+                         "testSet": j.test_set, "rawScore": j.raw_score,
+                         "totalPoints": j.total_points, "status": j.status,
+                         "reasons": j.reasons or [],
+                         "reviewedBy": j.reviewed_by, "reviewNote": j.review_note,
+                         "createdAt": j.created_at.strftime("%Y-%m-%d %H:%M:%S")}
+                        for j in records
+                    ]}
 
         elif act == "GET_SCAN_REVIEW_DETAIL":
             job = db.query(ScannerReview).filter_by(
