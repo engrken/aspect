@@ -379,7 +379,12 @@ async function handleBatchScanResult(result, classId, batchId) {
     // Candidate is safely stored under its original class and batch.
     return;
   }
-  if (result.autoSaveEligible) {
+  // An operator may disable or pause batch processing while a camera/network
+  // request is in flight. Preserve the staged scan but do not auto-commit.
+  if (!batchScanEnabled || batchScanPaused) {
+    showBatchFeedback('Batch processing was paused or switched off during capture. ' +
+      'The scan is pending review; no official grade was saved.', 'warning');
+  } else if (result.autoSaveEligible) {
     const save = await callApi({
       action: 'SCANNER_SUBMIT', sessionToken, classId, scanId: result.scanId
     });
