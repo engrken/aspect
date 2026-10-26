@@ -5,19 +5,28 @@ from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 try:
     from .database import (
         get_db, RosterUser, AuthSession, CourseClass,
-        ExamItem, Enrollment, Submission, hash_password, verify_password
+        ExamItem, Enrollment, Submission, ScannerReview, hash_password, verify_password
     )
     from .omr_engine import grade_sheet_opencv
+    from .scanner_batch import (
+        canonical_student_id, derive_review_reasons,
+        grade_answers, reconciled_breakdown
+    )
 except ImportError:
     from database import (
         get_db, RosterUser, AuthSession, CourseClass,
         ExamItem, Enrollment, Submission, hash_password, verify_password
     )
     from omr_engine import grade_sheet_opencv
+    from scanner_batch import (
+        canonical_student_id, derive_review_reasons,
+        grade_answers, reconciled_breakdown
+    )
 
 app = FastAPI()
 
@@ -46,6 +55,17 @@ class ApiPayload(BaseModel):
     isPassed: Optional[bool] = None
     studentIds: Optional[List[str]] = None
     studentsList: Optional[List[Dict[str, Any]]] = None
+    batchMode: bool = False
+    batchId: Optional[str] = None
+    clientQrId: Optional[str] = None
+    scanId: Optional[str] = None
+    allowOverwrite: bool = False
+    reviewDecision: Optional[str] = None
+    reviewedStudentId: Optional[str] = None
+    reviewedTestSet: Optional[str] = None
+    reviewedAnswers: Optional[Dict[str, Any]] = None
+    reviewConfirmed: bool = False
+    reviewNote: Optional[str] = None
 
 def validate_token(db: Session, token: Optional[str]):
     if not token:
@@ -54,6 +74,82 @@ def validate_token(db: Session, token: Optional[str]):
     if not sess or sess.expires_at < datetime.utcnow():
         return None
     return db.query(RosterUser).filter_by(student_id=sess.student_id).first()
+
+def can_scan_class(db, user, class_id):
+    cls = db.query(CourseClass).filter_by(class_id=class_id).first()
+    if not cls or (user.student_id.upper() != "FACULTY-01" and
+                   (cls.owner_teacher_id or "").upper() != user.student_id.upper()):
+        return None
+    return cls
+
+
+def scanner_items(db, class_id):
+    return db.query(ExamItem).filter_by(class_id=class_id).order_by(ExamItem.item_no.asc()).all()
+
+
+def resolve_enrolled_student(db, class_id, student_id):
+    sid = canonical_student_id(student_id)
+    if not sid:
+        return None
+    student = db.query(RosterUser).filter(RosterUser.student_id.ilike(sid)).first()
+    if not student or student.role == "TEACHER":
+        return None
+    enrollment = db.query(Enrollment).filter(
+        Enrollment.class_id == class_id,
+        Enrollment.student_id.ilike(sid)
+    ).first()
+    return student if enrollment else None
+
+
+def save_scanner_grade(db, class_id, student, test_set, answers, image,
+                       breakdown, allow_overwrite=False, published=True,
+                       origin_scan_id=""):
+    """Single serialized grade write. Never overwrite silently, including on retries."""
+    sid = canonical_student_id(student.student_id)
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+                   {"key": f"ASPECT:{class_id}:{sid}"})
+    # Local SQLite still honors the duplicate lookup, but cannot provide the
+    # PostgreSQL transaction-level advisory lock used by production.
+    existing = db.query(Submission).filter(
+        Submission.class_id == class_id,
+        Submission.student_id.ilike(sid)
+    ).first()
+    if existing and not allow_overwrite:
+        return {"success": False, "duplicate": True,
+                "message": "A grade already exists for this student and class. "
+                           "Review the existing grade before choosing an explicit replacement."}
+    score, total, answer_map, corrected = grade_answers(
+        scanner_items(db, class_id), answers, test_set
+    )
+    cls = db.query(CourseClass).filter_by(class_id=class_id).first()
+    pct = round(100 * score / total, 2) if total else 0.0
+    passed = pct >= (cls.passing_percentage if cls else 70)
+    record = existing
+    if record is None:
+        record = Submission(class_id=class_id, student_id=student.student_id)
+        db.add(record)
+    record.timestamp = datetime.utcnow()
+    record.full_name = student.full_name
+    record.section = student.section
+    record.test_set = test_set
+    record.raw_score = score
+    record.total_points = total
+    record.percentage = pct
+    record.is_passed = passed
+    record.is_published = bool(published)
+    record.origin_scan_id = origin_scan_id or ""
+    record.answers = answer_map
+    if image:
+        record.scanned_image = image.split(",", 1)[-1] if image.startswith("data:") else image
+    record.item_breakdown = reconciled_breakdown(breakdown, corrected)
+    db.flush()
+    return {"success": True, "studentId": student.student_id,
+            "fullName": student.full_name, "rawScore": score,
+            "totalPoints": total, "percentage": pct,
+            "status": "PASSED" if passed else "FAILED",
+            "replacedExisting": bool(existing)}
+
 
 @app.get("/")
 @app.get("/api")
@@ -75,33 +171,18 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                 return {"success": False, "message": "ID and Password are required."}
             user = db.query(RosterUser).filter(RosterUser.student_id.ilike(sid)).first()
             if not user:
-                if sid == "FACULTY-01":
-                    user = RosterUser(
-                        student_id="FACULTY-01",
-                        email="faculty@filamer.edu.ph",
-                        full_name="System Administrator",
-                        section="College of Engineering",
-                        role="TEACHER",
-                        password_hash=hash_password("admin123"),
-                        must_change_password=False
-                    )
-                    db.add(user)
-                    db.commit()
-                else:
-                    return {"success": False, "message": f'ID "{sid}" is not registered.'}
-
+                return {"success": False, "message": "Invalid ID or password."}
             if not user.password_hash or "$" not in str(user.password_hash):
-                default_pw = "admin123" if user.role == "TEACHER" else pwd
-                user.password_hash = hash_password(default_pw)
-                db.commit()
-
+                return {"success": False, "message": "Account requires an administrator password reset."}
             if not verify_password(pwd, user.password_hash):
-                if sid == "FACULTY-01" and pwd == "admin123":
-                    user.password_hash = hash_password("admin123")
-                    user.role = "TEACHER"
+                return {"success": False, "message": "Invalid ID or password."}
+
+            # Existing faculty accounts that still use the legacy bootstrap
+            # password must rotate credentials before any privileged action.
+            if user.role == "TEACHER" and verify_password("admin123", user.password_hash):
+                if not user.must_change_password:
+                    user.must_change_password = True
                     db.commit()
-                else:
-                    return {"success": False, "message": "Invalid password. Please try again."}
 
             session_token = str(uuid.uuid4())
             db.add(AuthSession(
@@ -200,7 +281,11 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             if not user:
                 return {"success": False, "message": "Unauthorized session."}
             new_pw = (payload.newPassword or "").strip()
-            if len(new_pw) < 6: return {"success": False, "message": "Password must be at least 6 characters long."}
+            min_len = 12 if user.role == "TEACHER" else 6
+            if len(new_pw) < min_len:
+                return {"success": False, "message": f"Password must be at least {min_len} characters long."}
+            if user.role == "TEACHER" and new_pw.lower() in ("admin123", "student123"):
+                return {"success": False, "message": "Choose a unique faculty password."}
             user.password_hash = hash_password(new_pw)
             user.must_change_password = False
             db.commit()
@@ -226,7 +311,10 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             user = validate_token(db, payload.sessionToken)
             if not user:
                 return {"success": False, "message": "Invalid session."}
-            subs = db.query(Submission).filter(Submission.student_id.ilike(user.student_id)).order_by(Submission.timestamp.desc()).all()
+            subs = db.query(Submission).filter(
+                Submission.student_id.ilike(user.student_id),
+                Submission.is_published.is_(True)
+            ).order_by(Submission.timestamp.desc()).all()
             classes = {c.class_id: c for c in db.query(CourseClass).all()}
             results = []
             for s in subs:
@@ -299,6 +387,8 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
         user = validate_token(db, payload.sessionToken)
         if not user or user.role != "TEACHER":
             return {"success": False, "message": "Unauthorized teacher session."}
+        if user.must_change_password:
+            return {"success": False, "message": "Faculty password change required before using teacher tools."}
 
         if act == "GET_CLASSES":
             if user.student_id.upper() == "FACULTY-01":
@@ -457,107 +547,280 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             return {"success": True, "message": f"Import complete: {added} new students added, {updated} updated. Default password is 'student123'."}
 
         elif act == "AI_VISION_GRADE":
-            encoded = payload.base64Image.split(",")[1] if "," in payload.base64Image else payload.base64Image
-            img_bytes = base64.b64decode(encoded)
-            items = payload.items or []
-            if not items and payload.classId:
-                db_items = db.query(ExamItem).filter_by(class_id=payload.classId).order_by(ExamItem.item_no.asc()).all()
-                items = [{"itemNo": i.item_no, "type": i.type, "points": i.points, "setA": i.set_a, "setB": i.set_b} for i in db_items]
-
-            detected_answers, raw_score, total_points, breakdown, detected_qr_id, warped_b64, detected_set = grade_sheet_opencv(
-                img_bytes, items, payload.testSet
+            cls = can_scan_class(db, user, payload.classId)
+            if not cls:
+                return {"success": False, "message": "Class not found or not assigned to you."}
+            db_items = scanner_items(db, payload.classId)
+            if not db_items or len(db_items) > 100:
+                return {"success": False, "message": "Set a valid 1–100 item answer key before scanning."}
+            if not payload.base64Image:
+                return {"success": False, "message": "No answer-sheet image was received."}
+            encoded = payload.base64Image.split(",", 1)[-1]
+            img_bytes = base64.b64decode(encoded, validate=True)
+            if len(img_bytes) > 12 * 1024 * 1024:
+                return {"success": False, "message": "Captured image is too large."}
+            items = [{"itemNo": i.item_no, "type": i.type, "points": i.points,
+                      "setA": i.set_a, "setB": i.set_b} for i in db_items]
+            (detected_answers, raw_score, total_points, breakdown,
+             detected_qr_id, warped_b64, detected_set, metadata) = grade_sheet_opencv(
+                img_bytes, items, payload.testSet, return_metadata=True
             )
-
-            cls_obj = db.query(CourseClass).filter_by(class_id=payload.classId).first()
-            pass_pct = cls_obj.passing_percentage if cls_obj else 70
-            percentage = round((raw_score / total_points) * 100, 2) if total_points > 0 else 0.0
-            is_passed = percentage >= pass_pct
-
+            qr_id = canonical_student_id(detected_qr_id)
+            student = db.query(RosterUser).filter(RosterUser.student_id.ilike(qr_id)).first() if qr_id else None
+            enrolled = bool(student and resolve_enrolled_student(db, payload.classId, qr_id))
+            duplicate = bool(qr_id and db.query(Submission).filter(
+                Submission.class_id == payload.classId,
+                Submission.student_id.ilike(qr_id)
+            ).first())
+            reasons = derive_review_reasons(
+                breakdown, qr_id, metadata["setMarkDetected"],
+                browser_qr_id=payload.clientQrId,
+                known_student=bool(student and student.role != "TEACHER"),
+                enrolled=enrolled, duplicate=duplicate
+            )
+            pct = round(100 * raw_score / total_points, 2) if total_points else 0.0
+            passed = pct >= cls.passing_percentage
+            scan_id = None
+            if payload.batchMode:
+                scan_id = str(uuid.uuid4())
+                db.add(ScannerReview(
+                    id=scan_id, class_id=payload.classId, teacher_id=user.student_id,
+                    batch_id=(payload.batchId or "")[:80],
+                    student_id=qr_id, detected_qr_id=qr_id,
+                    test_set=detected_set, status="PENDING",
+                    reasons=reasons, answers=detected_answers,
+                    item_breakdown=breakdown, scanned_image=warped_b64,
+                    raw_score=raw_score, total_points=total_points
+                ))
+                db.commit()
             return {
                 "success": True,
-                "studentId": payload.studentId or detected_qr_id or "",
+                "studentId": qr_id or canonical_student_id(payload.studentId),
+                "detectedQrId": qr_id,
+                "setMarkDetected": metadata["setMarkDetected"],
                 "detectedTestSet": detected_set,
                 "warpedBase64": warped_b64,
                 "answers": detected_answers,
                 "rawScore": raw_score,
                 "totalPoints": total_points,
-                "percentage": percentage,
-                "isPassed": is_passed,
-                "status": "PASSED" if is_passed else "FAILED",
-                "itemBreakdown": breakdown
+                "percentage": pct,
+                "isPassed": passed,
+                "status": "PASSED" if passed else "FAILED",
+                "itemBreakdown": breakdown,
+                "scanId": scan_id,
+                "reviewReasons": reasons,
+                "autoSaveEligible": bool(payload.batchMode and not reasons)
             }
 
         elif act == "SCANNER_SUBMIT":
-            sid = (payload.studentId or "").strip()
-            st = db.query(RosterUser).filter(RosterUser.student_id.ilike(sid)).first()
-            full_name = st.full_name if st else f"Student ({sid})"
-            section = st.section if st else "Scanned Sheet"
-
-            db_items = db.query(ExamItem).filter_by(class_id=payload.classId).order_by(ExamItem.item_no.asc()).all()
-            raw_score, total_points = 0, 0
-            ans_map = payload.answers or {}
-            t_set = (payload.testSet or "A").upper()
-
-            for it in db_items:
-                total_points += it.points
-                correct_key = (it.set_b if t_set == "B" else it.set_a).upper().strip()
-                s_ans = str(ans_map.get(str(it.item_no), ans_map.get(it.item_no, ""))).upper().strip()
-                if it.type == "TF":
-                    if s_ans == "A": s_ans = "T"
-                    elif s_ans == "B": s_ans = "F"
-                if s_ans and (s_ans == correct_key or correct_key in ["*", "ALL"]):
-                    raw_score += it.points
-
-            cls_obj = db.query(CourseClass).filter_by(class_id=payload.classId).first()
-            pass_pct = cls_obj.passing_percentage if cls_obj else 70
-            pct = round((raw_score / total_points) * 100, 2) if total_points > 0 else 0.0
-            is_passed = pct >= pass_pct
-            
-            img_b64 = payload.warpedBase64 or ""
-            if img_b64 and img_b64.startswith("data:image"):
-                img_b64 = img_b64.split(",")[1]
-
-            existing_sub = db.query(Submission).filter_by(class_id=payload.classId, student_id=sid).first()
-            if existing_sub:
-                existing_sub.timestamp = datetime.utcnow()
-                existing_sub.test_set = t_set
-                existing_sub.raw_score = raw_score
-                existing_sub.total_points = total_points
-                existing_sub.percentage = pct
-                existing_sub.is_passed = is_passed
-                existing_sub.answers = ans_map
-                if img_b64:
-                    existing_sub.scanned_image = img_b64
-                if payload.itemBreakdown:
-                    existing_sub.item_breakdown = payload.itemBreakdown
+            cls = can_scan_class(db, user, payload.classId)
+            if not cls:
+                return {"success": False, "message": "Class not found or not assigned to you."}
+            job = None
+            if payload.scanId:
+                job = db.query(ScannerReview).filter_by(
+                    id=payload.scanId, class_id=payload.classId,
+                    teacher_id=user.student_id
+                ).first()
+                if not job:
+                    return {"success": False, "message": "Scanned candidate not found."}
+                if job.status == "SAVED":
+                    return {"success": True, "alreadySaved": True,
+                            "message": "This scan was already saved."}
+                if job.status != "PENDING":
+                    return {"success": False, "message": "This scan is no longer pending."}
+                if job.reasons:
+                    return {"success": False, "reviewRequired": True,
+                            "message": "This scan needs manual review before saving."}
+                sid = job.detected_qr_id
+                key = job.test_set
+                answers = job.answers
+                preview = job.scanned_image
+                breakdown = job.item_breakdown
+                overwrite = False
             else:
-                db.add(Submission(
-                    class_id=payload.classId,
-                    student_id=sid,
-                    full_name=full_name,
-                    section=section,
-                    test_set=t_set,
-                    raw_score=raw_score,
-                    total_points=total_points,
-                    percentage=pct,
-                    is_passed=is_passed,
-                    answers=ans_map,
-                    scanned_image=img_b64,
-                    item_breakdown=payload.itemBreakdown or []
-                ))
+                sid = payload.studentId
+                key = (payload.testSet or "A").upper()
+                answers = payload.answers
+                preview = payload.warpedBase64 or ""
+                breakdown = payload.itemBreakdown
+                overwrite = bool(payload.allowOverwrite)
+            student = resolve_enrolled_student(db, payload.classId, sid)
+            if not student:
+                return {"success": False, "message": "Student is not enrolled in this class."}
+            result = save_scanner_grade(db, payload.classId, student, key,
+                                        answers, preview, breakdown, overwrite,
+                                        published=(job is None),
+                                        origin_scan_id=(job.id if job else ""))
+            if result["success"]:
+                if job:
+                    job.status = "SAVED"
+                    job.reviewed_at = datetime.utcnow()
+                    job.reviewed_by = user.student_id
+                db.commit()
+            else:
+                db.rollback()
+            return result
+
+        elif act == "GET_SCAN_REVIEW_QUEUE":
+            if not can_scan_class(db, user, payload.classId):
+                return {"success": False, "message": "Class not found or not assigned to you."}
+            jobs = db.query(ScannerReview).filter_by(
+                class_id=payload.classId, teacher_id=user.student_id,
+                status="PENDING"
+            ).order_by(ScannerReview.created_at.asc()).limit(250).all()
+            return {"success": True, "pendingCount": len(jobs), "jobs": [
+                {"scanId": j.id, "studentId": j.student_id, "testSet": j.test_set,
+                 "rawScore": j.raw_score, "totalPoints": j.total_points,
+                 "reasons": j.reasons or [],
+                 "createdAt": j.created_at.strftime("%Y-%m-%d %H:%M:%S")}
+                for j in jobs
+            ]}
+
+        elif act == "GET_SCAN_BATCH_REPORT":
+            if not can_scan_class(db, user, payload.classId):
+                return {"success": False, "message": "Class not found or not assigned to you."}
+            if not payload.batchId:
+                return {"success": False, "message": "A batch session is required."}
+            records = db.query(ScannerReview).filter_by(
+                class_id=payload.classId,
+                teacher_id=user.student_id,
+                batch_id=payload.batchId
+            ).order_by(ScannerReview.created_at.asc()).limit(1000).all()
+            summary = {"saved": 0, "pending": 0, "dismissed": 0, "published": 0}
+            for j in records:
+                status = j.status.lower()
+                if status in summary:
+                    summary[status] += 1
+                if j.published:
+                    summary["published"] += 1
+            return {"success": True, "batchId": payload.batchId, "summary": summary,
+                    "records": [
+                        {"scanId": j.id, "studentId": j.student_id,
+                         "testSet": j.test_set, "rawScore": j.raw_score,
+                         "totalPoints": j.total_points, "status": j.status,
+                         "published": bool(j.published),
+                         "reasons": j.reasons or [],
+                         "reviewedBy": j.reviewed_by, "reviewNote": j.review_note,
+                         "createdAt": j.created_at.strftime("%Y-%m-%d %H:%M:%S")}
+                        for j in records
+                    ]}
+
+        elif act == "GET_SCAN_BATCH_SESSIONS":
+            if not can_scan_class(db, user, payload.classId):
+                return {"success": False, "message": "Class not found or not assigned to you."}
+            recent = db.query(ScannerReview).filter_by(
+                class_id=payload.classId, teacher_id=user.student_id
+            ).order_by(ScannerReview.created_at.desc()).limit(1000).all()
+            sessions = {}
+            for j in recent:
+                if j.batch_id and j.batch_id not in sessions:
+                    sessions[j.batch_id] = {
+                        "batchId": j.batch_id,
+                        "lastScan": j.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                        "hasUnpublished": False
+                    }
+                if j.batch_id and j.status == "SAVED" and not j.published:
+                    sessions[j.batch_id]["hasUnpublished"] = True
+            return {"success": True, "sessions": list(sessions.values())[:50]}
+
+        elif act == "PUBLISH_SCAN_BATCH":
+            if not can_scan_class(db, user, payload.classId):
+                return {"success": False, "message": "Class not found or not assigned to you."}
+            if not payload.reviewConfirmed or not payload.batchId:
+                return {"success": False, "message": "Explicit publication confirmation is required."}
+            jobs = db.query(ScannerReview).filter_by(
+                class_id=payload.classId,
+                teacher_id=user.student_id,
+                batch_id=payload.batchId
+            ).with_for_update().all()
+            if any(j.status == "PENDING" for j in jobs):
+                return {"success": False, "message": "Resolve every pending sheet in this batch before publishing."}
+            saved = [j for j in jobs if j.status == "SAVED"]
+            if not saved:
+                return {"success": False, "message": "This batch has no approved grades to publish."}
+            count = 0
+            for j in saved:
+                if j.published:
+                    continue
+                submission = db.query(Submission).filter(
+                    Submission.class_id == j.class_id,
+                    Submission.student_id.ilike(j.student_id)
+                ).first()
+                if submission:
+                    if submission.origin_scan_id != j.id:
+                        return {"success": False, "message": "A grade in this batch was replaced "
+                                "by another scan. Review the newer batch before publishing."}
+                    submission.is_published = True
+                    j.published = True
+                    j.published_by = user.student_id
+                    j.published_at = datetime.utcnow()
+                    count += 1
             db.commit()
-            return {
-                "success": True,
-                "fullName": full_name,
-                "studentId": sid,
-                "rawScore": raw_score,
-                "totalPoints": total_points,
-                "percentage": pct,
-                "status": "PASSED" if is_passed else "FAILED"
-            }
+            return {"success": True, "publishedNow": count,
+                    "message": "Batch grades published to students."}
+
+        elif act == "GET_SCAN_REVIEW_DETAIL":
+            job = db.query(ScannerReview).filter_by(
+                id=payload.scanId, teacher_id=user.student_id,
+                class_id=payload.classId, status="PENDING"
+            ).first()
+            if not job or not can_scan_class(db, user, job.class_id):
+                return {"success": False, "message": "Pending scan not found."}
+            return {"success": True, "job": {
+                "scanId": job.id, "studentId": job.student_id,
+                "testSet": job.test_set, "answers": job.answers,
+                "scannedImage": job.scanned_image,
+                "itemBreakdown": job.item_breakdown, "reasons": job.reasons or [],
+                "rawScore": job.raw_score, "totalPoints": job.total_points
+            }}
+
+        elif act == "REVIEW_SCAN":
+            job = db.query(ScannerReview).filter_by(
+                id=payload.scanId, class_id=payload.classId,
+                teacher_id=user.student_id, status="PENDING"
+            ).first()
+            if not job or not can_scan_class(db, user, job.class_id):
+                return {"success": False, "message": "Pending scan not found."}
+            if payload.reviewDecision == "DISMISS":
+                if not payload.reviewConfirmed:
+                    return {"success": False, "message": "Confirm dismissal first."}
+                job.status = "DISMISSED"
+                job.reviewed_by = user.student_id
+                job.reviewed_at = datetime.utcnow()
+                job.review_note = (payload.reviewNote or "")[:500]
+                db.commit()
+                return {"success": True, "message": "Review scan dismissed. No grade was saved."}
+            if payload.reviewDecision != "SAVE" or not payload.reviewConfirmed:
+                return {"success": False, "message": "Confirm the reviewed answer sheet first."}
+            sid = payload.reviewedStudentId or job.student_id
+            student = resolve_enrolled_student(db, job.class_id, sid)
+            if not student:
+                return {"success": False, "message": "Choose an enrolled student before approving."}
+            exam_set = (payload.reviewedTestSet or job.test_set).upper()
+            answers = payload.reviewedAnswers if payload.reviewedAnswers is not None else job.answers
+            result = save_scanner_grade(
+                db, job.class_id, student, exam_set, answers,
+                job.scanned_image, job.item_breakdown,
+                bool(payload.allowOverwrite), published=False,
+                origin_scan_id=job.id
+            )
+            if result["success"]:
+                job.status = "SAVED"
+                job.student_id = canonical_student_id(student.student_id)
+                job.test_set = exam_set
+                job.reviewed_by = user.student_id
+                job.reviewed_at = datetime.utcnow()
+                job.review_note = (payload.reviewNote or "")[:500]
+                db.commit()
+            else:
+                db.rollback()
+            return result
 
         elif act == "UPDATE_SUBMISSION":
             sub = db.query(Submission).filter_by(id=payload.submissionId).first()
+            if sub and not can_scan_class(db, user, sub.class_id):
+                return {"success": False, "message": "Class not found or not assigned to you."}
             if not sub:
                 return {"success": False, "message": "Submission record not found."}
             sub.raw_score = payload.rawScore
@@ -569,6 +832,8 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             return {"success": True, "message": "Grade override applied successfully."}
 
         elif act == "GET_SUBMISSIONS":
+            if not can_scan_class(db, user, payload.classId):
+                return {"success": False, "message": "Class not found or not assigned to you."}
             subs = db.query(Submission).filter_by(class_id=payload.classId).order_by(Submission.timestamp.desc()).all()
             return {
                 "success": True,
@@ -583,6 +848,7 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                         "totalPoints": s.total_points,
                         "percentage": f"{s.percentage}%",
                         "isPassed": s.is_passed,
+                        "published": bool(s.is_published),
                         "timestamp": s.timestamp.strftime("%Y-%m-%d %H:%M"),
                         "scannedImage": s.scanned_image,
                         "answers": s.answers,

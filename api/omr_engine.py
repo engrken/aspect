@@ -177,21 +177,22 @@ def auto_warp_sheet_opencv(gray_img, is_form_100=False):
         "squares are visible, the entire sheet is in frame, and lighting is even."
     )
 
-def detect_shaded_test_set(blurred_img, default_set='A'):
+def detect_shaded_test_set(blurred_img, default_set='A', return_confidence=False):
     try:
         roi_a = blurred_img[98:109, 87:98]
         roi_b = blurred_img[98:109, 143:154]
         lum_a = float(np.percentile(roi_a, 35)) if roi_a.size > 0 else 255.0
         lum_b = float(np.percentile(roi_b, 35)) if roi_b.size > 0 else 255.0
         if lum_b + 20.0 < lum_a and lum_b < 135.0:
-            return 'B'
+            return ('B', True) if return_confidence else 'B'
         if lum_a + 20.0 < lum_b and lum_a < 135.0:
-            return 'A'
+            return ('A', True) if return_confidence else 'A'
     except Exception:
         pass
-    return str(default_set or 'A').upper()
+    fallback = str(default_set or 'A').upper()
+    return (fallback, False) if return_confidence else fallback
 
-def grade_sheet_opencv(image_bytes, items, test_set):
+def grade_sheet_opencv(image_bytes, items, test_set, return_metadata=False):
     np_arr = np.frombuffer(image_bytes, np.uint8)
     raw_img = cv2.imdecode(np_arr, cv2.IMREAD_GRAYSCALE)
     if raw_img is None:
@@ -208,7 +209,9 @@ def grade_sheet_opencv(image_bytes, items, test_set):
     H, W = img.shape
     blurred = cv2.GaussianBlur(img, (3, 3), 0)
 
-    active_set = detect_shaded_test_set(blurred, default_set=test_set)
+    active_set, set_mark_detected = detect_shaded_test_set(
+        blurred, default_set=test_set, return_confidence=True
+    )
     target_key = 'setB' if active_set == 'B' else 'setA'
 
     item_coords = {}
@@ -318,6 +321,13 @@ def grade_sheet_opencv(image_bytes, items, test_set):
             else:
                 student_ans = darkest['opt']
 
+        review_flag = ""
+        if is_double_shaded:
+            review_flag = "Multiple shaded bubbles"
+        elif darkest['lum'] < 165.0 and drop_from_lightest >= 14.0:
+            if 5.0 <= separation <= 13.0 or 14.0 <= drop_from_lightest < 20.0:
+                review_flag = "Faint or uncertain shading"
+
         normalized_ans = student_ans
         if q_type == 'TF' and normalized_ans and not is_double_shaded:
             if normalized_ans == 'A':
@@ -368,7 +378,14 @@ def grade_sheet_opencv(image_bytes, items, test_set):
             'studentAnswer': normalized_ans or '(Blank)',
             'correctAnswer': correct_ans,
             'isCorrect': is_correct,
+            'reviewFlag': review_flag,
             'bubbles': bubbles_overlay
         })
 
-    return detected_answers, raw_score, total_points, item_breakdown, detected_qr_id, warped_b64, active_set
+    result = (
+        detected_answers, raw_score, total_points, item_breakdown,
+        detected_qr_id, warped_b64, active_set
+    )
+    if return_metadata:
+        return (*result, {"setMarkDetected": set_mark_detected})
+    return result

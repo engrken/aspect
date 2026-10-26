@@ -89,9 +89,37 @@ class Submission(Base):
     total_points = Column(Integer)
     percentage = Column(Float)
     is_passed = Column(Boolean)
+    is_published = Column(Boolean, default=True)
+    origin_scan_id = Column(String, default="")
     answers = Column(JSON)
     scanned_image = Column(String, default="")
     item_breakdown = Column(JSON, default=[])
+
+class ScannerReview(Base):
+    """Persistent, non-public candidate scans. Only approved scans affect grades."""
+    __tablename__ = "scanner_review_queue"
+    id = Column(String, primary_key=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    class_id = Column(String, index=True, nullable=False)
+    teacher_id = Column(String, index=True, nullable=False)
+    batch_id = Column(String, index=True, default="")
+    student_id = Column(String, default="")
+    detected_qr_id = Column(String, default="")
+    test_set = Column(String, default="A")
+    status = Column(String, default="PENDING", index=True)
+    published = Column(Boolean, default=False)
+    published_by = Column(String, default="")
+    published_at = Column(DateTime, nullable=True)
+    reasons = Column(JSON, default=list)
+    answers = Column(JSON, default=dict)
+    item_breakdown = Column(JSON, default=list)
+    scanned_image = Column(String, default="")
+    raw_score = Column(Integer, default=0)
+    total_points = Column(Integer, default=0)
+    reviewed_by = Column(String, default="")
+    reviewed_at = Column(DateTime, nullable=True)
+    review_note = Column(String, default="")
+
 
 def ensure_seeded(db):
     Base.metadata.create_all(bind=engine)
@@ -101,7 +129,9 @@ def ensure_seeded(db):
         "ALTER TABLE roster ADD COLUMN IF NOT EXISTS password_hash VARCHAR DEFAULT ''",
         "ALTER TABLE roster ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN DEFAULT FALSE",
         "ALTER TABLE exam_submissions ADD COLUMN IF NOT EXISTS scanned_image TEXT DEFAULT ''",
-        "ALTER TABLE exam_submissions ADD COLUMN IF NOT EXISTS item_breakdown JSON"
+        "ALTER TABLE exam_submissions ADD COLUMN IF NOT EXISTS item_breakdown JSON",
+        "ALTER TABLE exam_submissions ADD COLUMN IF NOT EXISTS is_published BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE exam_submissions ADD COLUMN IF NOT EXISTS origin_scan_id VARCHAR DEFAULT ''"
     ]
     
     for query in migrations:
@@ -127,19 +157,23 @@ def ensure_seeded(db):
     try:
         faculty = db.query(RosterUser).filter_by(student_id="FACULTY-01").first()
         if not faculty:
-            db.add(RosterUser(
-                student_id="FACULTY-01",
-                email="faculty@filamer.edu.ph",
-                full_name="System Administrator",
-                section="College of Engineering",
-                role="TEACHER",
-                password_hash=hash_password("admin123"),
-                must_change_password=False
-            ))
-            db.commit()
+            bootstrap_password = os.getenv("ASPECT_INITIAL_ADMIN_PASSWORD", "").strip()
+            if len(bootstrap_password) >= 12:
+                db.add(RosterUser(
+                    student_id="FACULTY-01",
+                    email="faculty@filamer.edu.ph",
+                    full_name="System Administrator",
+                    section="College of Engineering",
+                    role="TEACHER",
+                    password_hash=hash_password(bootstrap_password),
+                    must_change_password=True
+                ))
+                db.commit()
+            else:
+                print("ASPECT setup: set ASPECT_INITIAL_ADMIN_PASSWORD (12+ chars) "
+                      "to create the initial administrator; no default admin was created.")
         elif not faculty.password_hash:
-            faculty.password_hash = hash_password("admin123")
-            db.commit()
+            print("ASPECT setup: existing administrator needs manual password recovery.")
     except Exception:
         db.rollback()
 
