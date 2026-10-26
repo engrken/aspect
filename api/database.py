@@ -93,6 +93,28 @@ class Submission(Base):
     scanned_image = Column(String, default="")
     item_breakdown = Column(JSON, default=[])
 
+class ScannerReview(Base):
+    """Persistent, non-public candidate scans. Only approved scans affect grades."""
+    __tablename__ = "scanner_review_queue"
+    id = Column(String, primary_key=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    class_id = Column(String, index=True, nullable=False)
+    teacher_id = Column(String, index=True, nullable=False)
+    student_id = Column(String, default="")
+    detected_qr_id = Column(String, default="")
+    test_set = Column(String, default="A")
+    status = Column(String, default="PENDING", index=True)
+    reasons = Column(JSON, default=list)
+    answers = Column(JSON, default=dict)
+    item_breakdown = Column(JSON, default=list)
+    scanned_image = Column(String, default="")
+    raw_score = Column(Integer, default=0)
+    total_points = Column(Integer, default=0)
+    reviewed_by = Column(String, default="")
+    reviewed_at = Column(DateTime, nullable=True)
+    review_note = Column(String, default="")
+
+
 def ensure_seeded(db):
     Base.metadata.create_all(bind=engine)
     
