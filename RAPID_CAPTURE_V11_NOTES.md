@@ -1,3 +1,5 @@
+> **Superseded by ASPECT_SCANNER_V12_ROLLOUT.md.** This v11 design documented capture-only behavior; the combined v12 release candidate now includes opt-in batch staging, review, unpublished drafts, final publication, and security fixes. Do not use the older instructions as the rollout procedure.
+
 # ASPECT v11 — Reactive auto-capture
 
 This change only updates the scanner client, its browser test, and the teacher-scanner UI copy. It does not alter the answer sheet, database, marking keys, or API.
