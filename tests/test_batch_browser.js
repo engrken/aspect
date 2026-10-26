@@ -71,6 +71,7 @@ async function exec(source) {
 
 (async()=>{
   // The grade endpoint should have staged the candidate first.
+  await exec('toggleBatchMode(true)');
   const good = {scanId:'scan-1',detectedQrId:'S01',
     rawScore:50,totalPoints:50,reviewReasons:[],autoSaveEligible:true};
   const before = actions.length;
