@@ -102,7 +102,7 @@ def resolve_enrolled_student(db, class_id, student_id):
 
 
 def save_scanner_grade(db, class_id, student, test_set, answers, image,
-                       breakdown, allow_overwrite=False):
+                       breakdown, allow_overwrite=False, published=True):
     """Single serialized grade write. Never overwrite silently, including on retries."""
     sid = canonical_student_id(student.student_id)
     db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
@@ -133,6 +133,7 @@ def save_scanner_grade(db, class_id, student, test_set, answers, image,
     record.total_points = total
     record.percentage = pct
     record.is_passed = passed
+    record.is_published = bool(published)
     record.answers = answer_map
     if image:
         record.scanned_image = image.split(",", 1)[-1] if image.startswith("data:") else image
@@ -316,7 +317,10 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             user = validate_token(db, payload.sessionToken)
             if not user:
                 return {"success": False, "message": "Invalid session."}
-            subs = db.query(Submission).filter(Submission.student_id.ilike(user.student_id)).order_by(Submission.timestamp.desc()).all()
+            subs = db.query(Submission).filter(
+                Submission.student_id.ilike(user.student_id),
+                Submission.is_published.is_(True)
+            ).order_by(Submission.timestamp.desc()).all()
             classes = {c.class_id: c for c in db.query(CourseClass).all()}
             results = []
             for s in subs:
@@ -649,7 +653,8 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             if not student:
                 return {"success": False, "message": "Student is not enrolled in this class."}
             result = save_scanner_grade(db, payload.classId, student, key,
-                                        answers, preview, breakdown, overwrite)
+                                        answers, preview, breakdown, overwrite,
+                                        published=(job is None))
             if result["success"]:
                 if job:
                     job.status = "SAVED"
@@ -685,21 +690,75 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                 teacher_id=user.student_id,
                 batch_id=payload.batchId
             ).order_by(ScannerReview.created_at.asc()).limit(1000).all()
-            summary = {"saved": 0, "pending": 0, "dismissed": 0}
+            summary = {"saved": 0, "pending": 0, "dismissed": 0, "published": 0}
             for j in records:
                 status = j.status.lower()
                 if status in summary:
                     summary[status] += 1
+                if j.published:
+                    summary["published"] += 1
             return {"success": True, "batchId": payload.batchId, "summary": summary,
                     "records": [
                         {"scanId": j.id, "studentId": j.student_id,
                          "testSet": j.test_set, "rawScore": j.raw_score,
                          "totalPoints": j.total_points, "status": j.status,
+                         "published": bool(j.published),
                          "reasons": j.reasons or [],
                          "reviewedBy": j.reviewed_by, "reviewNote": j.review_note,
                          "createdAt": j.created_at.strftime("%Y-%m-%d %H:%M:%S")}
                         for j in records
                     ]}
+
+        elif act == "GET_SCAN_BATCH_SESSIONS":
+            if not can_scan_class(db, user, payload.classId):
+                return {"success": False, "message": "Class not found or not assigned to you."}
+            recent = db.query(ScannerReview).filter_by(
+                class_id=payload.classId, teacher_id=user.student_id
+            ).order_by(ScannerReview.created_at.desc()).limit(1000).all()
+            sessions = {}
+            for j in recent:
+                if j.batch_id and j.batch_id not in sessions:
+                    sessions[j.batch_id] = {
+                        "batchId": j.batch_id,
+                        "lastScan": j.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                        "hasUnpublished": False
+                    }
+                if j.batch_id and j.status == "SAVED" and not j.published:
+                    sessions[j.batch_id]["hasUnpublished"] = True
+            return {"success": True, "sessions": list(sessions.values())[:50]}
+
+        elif act == "PUBLISH_SCAN_BATCH":
+            if not can_scan_class(db, user, payload.classId):
+                return {"success": False, "message": "Class not found or not assigned to you."}
+            if not payload.reviewConfirmed or not payload.batchId:
+                return {"success": False, "message": "Explicit publication confirmation is required."}
+            jobs = db.query(ScannerReview).filter_by(
+                class_id=payload.classId,
+                teacher_id=user.student_id,
+                batch_id=payload.batchId
+            ).with_for_update().all()
+            if any(j.status == "PENDING" for j in jobs):
+                return {"success": False, "message": "Resolve every pending sheet in this batch before publishing."}
+            saved = [j for j in jobs if j.status == "SAVED"]
+            if not saved:
+                return {"success": False, "message": "This batch has no approved grades to publish."}
+            count = 0
+            for j in saved:
+                if j.published:
+                    continue
+                submission = db.query(Submission).filter(
+                    Submission.class_id == j.class_id,
+                    Submission.student_id.ilike(j.student_id)
+                ).first()
+                if submission:
+                    submission.is_published = True
+                    j.published = True
+                    j.published_by = user.student_id
+                    j.published_at = datetime.utcnow()
+                    count += 1
+            db.commit()
+            return {"success": True, "publishedNow": count,
+                    "message": "Batch grades published to students."}
 
         elif act == "GET_SCAN_REVIEW_DETAIL":
             job = db.query(ScannerReview).filter_by(
@@ -743,7 +802,7 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             result = save_scanner_grade(
                 db, job.class_id, student, exam_set, answers,
                 job.scanned_image, job.item_breakdown,
-                bool(payload.allowOverwrite)
+                bool(payload.allowOverwrite), published=False
             )
             if result["success"]:
                 job.status = "SAVED"
@@ -788,6 +847,7 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                         "totalPoints": s.total_points,
                         "percentage": f"{s.percentage}%",
                         "isPassed": s.is_passed,
+                        "published": bool(s.is_published),
                         "timestamp": s.timestamp.strftime("%Y-%m-%d %H:%M"),
                         "scannedImage": s.scanned_image,
                         "answers": s.answers,
