@@ -253,6 +253,7 @@ function estimateProbeDetail(imgData, W, H) {
 
 function startAutoScanLoop() {
   stopAutoScanLoop();
+  if (typeof isBatchScanPaused === 'function' && isBatchScanPaused()) return;
   stableAlignmentCount = 0;
   priorStableCorners = null;
 
@@ -606,6 +607,10 @@ function drawValidationOverlays(ctx, itemBreakdown) {
 
 async function processCameraFrame(preDetectedCorners = null, suppliedCanvas = null) {
   if (isScanningFrame) return;
+  const captureClassId = activeClassId;
+  const activeBatch = typeof isBatchScanEnabled === 'function' && isBatchScanEnabled();
+  const captureBatchId = activeBatch && typeof activeBatchSessionId === 'function'
+    ? activeBatchSessionId() : null;
   isScanningFrame = true;
   stopAutoScanLoop();
 
@@ -637,8 +642,13 @@ async function processCameraFrame(preDetectedCorners = null, suppliedCanvas = nu
   } catch (err) {
     btn.disabled = false;
     isScanningFrame = false;
-    alert('Capture error: ' + (err?.message || err));
-    resetToLiveCamera();
+    if (activeBatch && typeof showBatchFeedback === 'function') {
+      showBatchFeedback('Capture failed. No grade saved: ' + (err?.message || err) +
+        '. Remove and reposition the sheet.', 'danger');
+    } else {
+      alert('Capture error: ' + (err?.message || err));
+    }
+    resetToLiveCamera(activeBatch);
     return;
   }
 
@@ -648,17 +658,24 @@ async function processCameraFrame(preDetectedCorners = null, suppliedCanvas = nu
     res = await callApi({
       action: 'AI_VISION_GRADE',
       sessionToken,
-      classId: activeClassId,
+      classId: captureClassId,
       studentId: activeStudentId,
+      clientQrId: qrResult?.studentId || null,
       testSet: activeSet,
-      base64Image: compressedBase64,
-      items: builderItems
+      batchMode: activeBatch,
+      batchId: captureBatchId,
+      base64Image: compressedBase64
     });
   } catch (error) {
     btn.disabled = false;
     isScanningFrame = false;
-    alert('Scan connection error: ' + (error?.message || String(error)));
-    resetToLiveCamera();
+    if (activeBatch && typeof showBatchFeedback === 'function') {
+      showBatchFeedback('Connection failed. No grade saved: ' + (error?.message || String(error)) +
+        '. Retry this paper.', 'danger');
+    } else {
+      alert('Scan connection error: ' + (error?.message || String(error)));
+    }
+    resetToLiveCamera(activeBatch);
     return;
   }
 
@@ -666,8 +683,19 @@ async function processCameraFrame(preDetectedCorners = null, suppliedCanvas = nu
   isScanningFrame = false;
 
   if (!res.success) {
-    alert("Grading Error: " + res.message);
-    resetToLiveCamera();
+    if (activeBatch && typeof showBatchFeedback === 'function') {
+      showBatchFeedback('Cannot grade this sheet: ' + (res.message || 'Unknown error') +
+        '. No grade saved. Remove and retry.', 'warning');
+    } else {
+      alert("Grading Error: " + res.message);
+    }
+    resetToLiveCamera(activeBatch);
+    return;
+  }
+
+  if (captureClassId !== activeClassId) {
+    // A changed subject cannot render or save the previous class's response.
+    resetToLiveCamera(true);
     return;
   }
 
@@ -714,7 +742,7 @@ async function processCameraFrame(preDetectedCorners = null, suppliedCanvas = nu
   }
 
   lastScannedData = {
-    classId: activeClassId,
+    classId: captureClassId,
     studentId: res.studentId || activeStudentId,
     testSet: gradedSet,
     answers: res.answers,
@@ -730,6 +758,21 @@ async function processCameraFrame(preDetectedCorners = null, suppliedCanvas = nu
   const cameraInfo = document.getElementById('scanner-camera-info');
   if (cameraInfo) cameraInfo.innerText =
     `Captured: ${rawCanvas.width} × ${rawCanvas.height} · Graded sheet aligned by OpenCV. Review both views before saving.`;
+  if (activeBatch) {
+    // Candidates were already written to a private server-side staging queue
+    // during grading; safe scans are then committed automatically.
+    document.getElementById('btn-save-scan').disabled = true;
+    if (typeof handleBatchScanResult === 'function') {
+      await handleBatchScanResult(res, captureClassId, captureBatchId);
+    } else {
+      resetToLiveCamera(true);
+    }
+    return;
+  }
+  if (res.reviewReasons?.length) {
+    const caution = document.getElementById('scan-grade-display');
+    if (caution) caution.innerText = 'Review before saving: ' + res.reviewReasons.join('; ');
+  }
   if (lastScannedData.studentId) {
     document.getElementById('btn-save-scan').disabled = false;
   }
@@ -737,6 +780,10 @@ async function processCameraFrame(preDetectedCorners = null, suppliedCanvas = nu
 
 async function submitScannedResult() {
   if (!lastScannedData) return;
+  if (typeof isBatchScanEnabled === 'function' && isBatchScanEnabled()) {
+    alert('Use the Batch Review Queue to approve this sheet.');
+    return;
+  }
   const studentId = document.getElementById('scan-detected-id').value.trim();
   if (!studentId) return alert("Select or scan an examinee before saving.");
 
@@ -745,17 +792,22 @@ async function submitScannedResult() {
   btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span> Recording Grade...`;
 
   try {
-    const res = await callApi({
+    const submission = {
       action: 'SCANNER_SUBMIT',
       sessionToken,
       classId: lastScannedData.classId,
       studentId: studentId,
       testSet: lastScannedData.testSet,
       answers: lastScannedData.answers,
-      items: builderItems,
       warpedBase64: lastScannedData.warpedBase64,
       itemBreakdown: lastScannedData.itemBreakdown
-    });
+    };
+    let res = await callApi(submission);
+    if (res.duplicate && window.confirm(
+      'A grade already exists for this student. Replace the saved grade with this reviewed sheet?'
+    )) {
+      res = await callApi({ ...submission, allowOverwrite: true });
+    }
 
     btn.disabled = false;
     btn.innerHTML = `<i class="bi bi-cloud-arrow-up-fill me-1"></i> Save Grade to Roster`;
