@@ -12,6 +12,7 @@ let currentSubmissions = [];
 let isRosterLoaded = false;
 let isSubmissionsLoaded = false;
 let isBuilderLoaded = false;
+let facultyPasswordMustChange = false;
 
 async function callApi(payload) {
   try {
@@ -66,8 +67,19 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (!isBuilderLoaded) loadExamBuilder();
   });
 
-  // Unlock the UI instantly before the background tables finish loading
   hideGlobalLoader();
+  facultyPasswordMustChange = !!auth.user.mustChangePassword;
+  if (facultyPasswordMustChange) {
+    const warning = document.getElementById('faculty-password-warning');
+    if (warning) warning.style.display = 'block';
+    document.querySelectorAll('.faculty-password-dismiss').forEach(btn => {
+      btn.style.display = 'none';
+    });
+    new bootstrap.Modal(document.getElementById('password-modal'), {
+      backdrop: 'static', keyboard: false
+    }).show();
+    return;
+  }
   await loadClasses();
 });
 
@@ -115,7 +127,13 @@ async function handleChangePassword(e) {
 
   if (res.success) {
     bootstrap.Modal.getInstance(document.getElementById('password-modal')).hide();
-    alert("Your password has been updated!");
+    if (facultyPasswordMustChange) {
+      facultyPasswordMustChange = false;
+      await loadClasses();
+      alert("Password updated. Faculty tools are now unlocked.");
+    } else {
+      alert("Your password has been updated!");
+    }
   } else {
     alert("Error: " + res.message);
   }
