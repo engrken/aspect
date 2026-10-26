@@ -55,7 +55,8 @@ GitHub Actions `.github/workflows/aspect-scanner-ci.yml` also runs these checks.
 - [ ] Simulate failed network request, refresh while an exception is pending, switch class during a request, pause during a request, and resume an older batch.
 - [ ] Verify all 100 expected student IDs once and only once against the physical paper stack before publishing.
 - [ ] Test staging preview for mobile layout and accessibility.
-- [ ] Check admin/teacher credential hygiene. The existing ASPECT repository retains legacy default-password bootstrap logic; this is a security hardening item that must be addressed as part of a secure public deployment and may require an explicit administrator credential migration.
+- [ ] Confirm the security migration: hardcoded FACULTY-01 auto-login/reset is removed, missing admin bootstrap now requires the `ASPECT_INITIAL_ADMIN_PASSWORD` environment variable with at least 12 characters, legacy faculty accounts using `admin123` must rotate passwords before accessing teacher tools, and changed passwords are not overwritten by default. If the production administrator still uses the legacy password, verify the forced-change path on staging before release.
+- [ ] Separately audit other legacy faculty/student provisioning and privileged class-modification endpoints before any wider public deployment; this scanner PR only hardens teacher login, grade scanning, grade retrieval/override, and publication routes.
 
 ## Limitations
 - Captures are reactive, not guaranteed instantaneous: real-camera autofocus, image upload, QR detection and Vercel/OpenCV compute all introduce variable latency.
