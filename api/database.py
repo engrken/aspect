@@ -100,6 +100,7 @@ class ScannerReview(Base):
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     class_id = Column(String, index=True, nullable=False)
     teacher_id = Column(String, index=True, nullable=False)
+    batch_id = Column(String, index=True, default="")
     student_id = Column(String, default="")
     detected_qr_id = Column(String, default="")
     test_set = Column(String, default="A")
