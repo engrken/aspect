@@ -403,8 +403,11 @@ async function handleBatchScanResult(result, classId, batchId) {
       '. No official grade was saved.', 'warning');
   }
   if (classId === activeClassId) {
-    await Promise.all([refreshBatchReviewQueue(), refreshBatchReport()]);
+    // Re-arm immediately after the grade write; don't force staff to wait
+    // for two extra read-only API calls before positioning the next paper.
     resetToLiveCamera(true);
+    Promise.all([refreshBatchReviewQueue(), refreshBatchReport()])
+      .catch(error => console.warn('Batch counters will refresh on demand:', error));
   }
 }
 
