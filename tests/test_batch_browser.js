@@ -14,7 +14,7 @@ const els = id => {
       id, style: {display: 'block'}, innerText: '', innerHTML: '',
       textContent: '', value: '', checked: false, disabled: false,
       videoWidth: 640, videoHeight: 480, readyState: 4,
-      setAttribute(){}, removeAttribute(){},
+      setAttribute(){}, removeAttribute(){}, appendChild(){},
       getContext() {return {drawImage(){}, getImageData(){return {data:new Uint8Array(640*480*4)}}};}
     });
   }
