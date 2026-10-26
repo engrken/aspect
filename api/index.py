@@ -168,33 +168,18 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                 return {"success": False, "message": "ID and Password are required."}
             user = db.query(RosterUser).filter(RosterUser.student_id.ilike(sid)).first()
             if not user:
-                if sid == "FACULTY-01":
-                    user = RosterUser(
-                        student_id="FACULTY-01",
-                        email="faculty@filamer.edu.ph",
-                        full_name="System Administrator",
-                        section="College of Engineering",
-                        role="TEACHER",
-                        password_hash=hash_password("admin123"),
-                        must_change_password=False
-                    )
-                    db.add(user)
-                    db.commit()
-                else:
-                    return {"success": False, "message": f'ID "{sid}" is not registered.'}
-
+                return {"success": False, "message": "Invalid ID or password."}
             if not user.password_hash or "$" not in str(user.password_hash):
-                default_pw = "admin123" if user.role == "TEACHER" else pwd
-                user.password_hash = hash_password(default_pw)
-                db.commit()
-
+                return {"success": False, "message": "Account requires an administrator password reset."}
             if not verify_password(pwd, user.password_hash):
-                if sid == "FACULTY-01" and pwd == "admin123":
-                    user.password_hash = hash_password("admin123")
-                    user.role = "TEACHER"
+                return {"success": False, "message": "Invalid ID or password."}
+
+            # Existing faculty accounts that still use the legacy bootstrap
+            # password must rotate credentials before any privileged action.
+            if user.role == "TEACHER" and verify_password("admin123", user.password_hash):
+                if not user.must_change_password:
+                    user.must_change_password = True
                     db.commit()
-                else:
-                    return {"success": False, "message": "Invalid password. Please try again."}
 
             session_token = str(uuid.uuid4())
             db.add(AuthSession(
@@ -293,7 +278,11 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             if not user:
                 return {"success": False, "message": "Unauthorized session."}
             new_pw = (payload.newPassword or "").strip()
-            if len(new_pw) < 6: return {"success": False, "message": "Password must be at least 6 characters long."}
+            min_len = 12 if user.role == "TEACHER" else 6
+            if len(new_pw) < min_len:
+                return {"success": False, "message": f"Password must be at least {min_len} characters long."}
+            if user.role == "TEACHER" and new_pw.lower() in ("admin123", "student123"):
+                return {"success": False, "message": "Choose a unique faculty password."}
             user.password_hash = hash_password(new_pw)
             user.must_change_password = False
             db.commit()
@@ -395,6 +384,8 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
         user = validate_token(db, payload.sessionToken)
         if not user or user.role != "TEACHER":
             return {"success": False, "message": "Unauthorized teacher session."}
+        if user.must_change_password:
+            return {"success": False, "message": "Faculty password change required before using teacher tools."}
 
         if act == "GET_CLASSES":
             if user.student_id.upper() == "FACULTY-01":
