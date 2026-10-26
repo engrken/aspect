@@ -6,7 +6,7 @@
 let batchScanEnabled = false;
 let batchScanPaused = false;
 let activeReviewJob = null;
-let lastBatchSummary = { saved: 0, pending: 0, dismissed: 0 };
+let lastBatchSummary = { saved: 0, pending: 0, dismissed: 0, published: 0 };
 
 function batchSessionKey() {
   return 'aspect_batch_session_' + (activeClassId || 'none');
@@ -71,6 +71,7 @@ function toggleBatchMode(enabled) {
     showBatchFeedback('Rapid Batch Mode active. Auto-save requires clear QR, test set, and answers. Uncertain sheets go to Review.', 'primary');
     refreshBatchReport();
     refreshBatchReviewQueue();
+    refreshBatchSessions();
     if (!lastScannedData && !isScanningFrame) startAutoScanLoop();
   } else {
     showBatchFeedback('Manual scanning active. Grades require Save Grade to Roster.', 'secondary');
@@ -97,16 +98,18 @@ function startNewBatchSession() {
   if (!window.confirm('Start a new batch counter? Existing saved grades and review scans will remain unchanged.')) return;
   const id = newBatchIdentifier();
   localStorage.setItem(batchSessionKey(), id);
-  lastBatchSummary = { saved: 0, pending: 0, dismissed: 0 };
+  lastBatchSummary = { saved: 0, pending: 0, dismissed: 0, published: 0 };
   renderBatchSummary();
-  showBatchFeedback('New batch session started. Previous grades and review records were preserved.', 'success');
+  showBatchFeedback('New batch session started. Earlier batches are still available under Previous Batches.', 'success');
   refreshBatchReport();
+  refreshBatchSessions();
 }
 
 function renderBatchSummary() {
   batchSetText('batch-saved-count', lastBatchSummary.saved || 0);
   batchSetText('batch-pending-count', lastBatchSummary.pending || 0);
   batchSetText('batch-dismissed-count', lastBatchSummary.dismissed || 0);
+  batchSetText('batch-published-count', lastBatchSummary.published || 0);
   const target = Math.max(1, Number(document.getElementById('batch-target-count')?.value) || 100);
   const complete = lastBatchSummary.saved || 0;
   batchSetText('batch-target-progress', complete + ' / ' + target + ' saved');
@@ -130,6 +133,73 @@ async function refreshBatchReport() {
     renderBatchSummary();
   }
   return res;
+}
+
+async function refreshBatchSessions() {
+  if (!activeClassId) return;
+  const classId = activeClassId;
+  const current = activeBatchSessionId();
+  const res = await callApi({
+    action: 'GET_SCAN_BATCH_SESSIONS', sessionToken, classId
+  });
+  if (!res.success || activeClassId !== classId) return;
+  const select = document.getElementById('batch-session-select');
+  if (!select) return;
+  select.innerHTML = '';
+  const known = new Set();
+  const options = [
+    {batchId: current, lastScan: 'Current session', hasUnpublished: false},
+    ...(res.sessions || [])
+  ];
+  options.forEach(item => {
+    if (known.has(item.batchId)) return;
+    known.add(item.batchId);
+    const option = document.createElement('option');
+    option.value = item.batchId;
+    option.textContent = item.lastScan +
+      (item.hasUnpublished ? ' · Unpublished grades' : '');
+    option.selected = item.batchId === current;
+    select.appendChild(option);
+  });
+}
+
+function switchBatchSession(value) {
+  if (!value) return;
+  localStorage.setItem(batchSessionKey(), value);
+  lastBatchSummary = {saved:0,pending:0,dismissed:0,published:0};
+  renderBatchSummary();
+  refreshBatchReport();
+  showBatchFeedback('Restored an existing batch session. Review its progress before continuing.', 'info');
+}
+
+async function publishCurrentBatch() {
+  const batchId = activeBatchSessionId();
+  const classId = activeClassId;
+  const report = await refreshBatchReport();
+  if (!report?.success) {
+    showBatchFeedback(report?.message || 'Unable to verify batch status.', 'danger');
+    return;
+  }
+  if (report.summary?.pending) {
+    showBatchFeedback('Resolve all pending sheets in this batch before publishing.', 'warning');
+    return;
+  }
+  if (!report.summary?.saved) {
+    showBatchFeedback('This batch has no verified grades to publish.', 'warning');
+    return;
+  }
+  if (!window.confirm('Publish every approved grade in this batch to students? Confirm that the roster, answers, and exception reviews are complete.')) return;
+  const res = await callApi({
+    action: 'PUBLISH_SCAN_BATCH', sessionToken, classId,
+    batchId, reviewConfirmed: true
+  });
+  if (!res.success) {
+    showBatchFeedback(res.message || 'Publication failed.', 'danger');
+    return;
+  }
+  showBatchFeedback('Batch published. ' + (res.publishedNow || 0) +
+    ' additional grades are now visible to students.', 'success');
+  await Promise.all([refreshBatchReport(), refreshBatchSessions()]);
 }
 
 async function refreshBatchReviewQueue() {
@@ -335,11 +405,12 @@ async function handleBatchScanResult(result, classId, batchId) {
 
 function onBatchClassChanged() {
   closeBatchReview();
-  lastBatchSummary = { saved: 0, pending: 0, dismissed: 0 };
+  lastBatchSummary = { saved: 0, pending: 0, dismissed: 0, published: 0 };
   renderBatchSummary();
   if (batchScanEnabled) {
     refreshBatchReport();
     refreshBatchReviewQueue();
+    refreshBatchSessions();
   }
 }
 
@@ -358,13 +429,13 @@ async function downloadBatchAuditCSV() {
   }
   const headings = [
     'Scan ID', 'Student ID', 'Exam Set', 'Score', 'Total',
-    'Status', 'Review Reasons', 'Reviewed By', 'Review Note', 'Captured'
+    'Status', 'Published', 'Review Reasons', 'Reviewed By', 'Review Note', 'Captured'
   ];
   const lines = [headings.map(csvSafe).join(',')];
   (report.records || []).forEach(r => {
     lines.push([
       r.scanId, r.studentId, r.testSet, r.rawScore, r.totalPoints,
-      r.status, (r.reasons || []).join('; '), r.reviewedBy,
+      r.status, r.published ? 'YES' : 'NO', (r.reasons || []).join('; '), r.reviewedBy,
       r.reviewNote, r.createdAt
     ].map(csvSafe).join(','));
   });
