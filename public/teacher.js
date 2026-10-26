@@ -754,7 +754,10 @@ async function loadSubmissionsLedger() {
       <td><span class="badge bg-secondary">${s.testSet || 'A'}</span></td>
       <td class="fw-bold font-monospace">${s.rawScore} / ${s.totalPoints}</td>
       <td class="fw-bold">${s.percentage}</td>
-      <td><span class="badge ${s.isPassed ? 'bg-success' : 'bg-danger'}">${s.isPassed ? 'PASSED' : 'FAILED'}</span></td>
+      <td>
+        <span class="badge ${s.isPassed ? 'bg-success' : 'bg-danger'}">${s.isPassed ? 'PASSED' : 'FAILED'}</span>
+        ${s.published === false ? '<span class="badge bg-warning text-dark ms-1">UNPUBLISHED</span>' : ''}
+      </td>
       <td class="small text-body-secondary">${s.timestamp}</td>
       <td class="text-center">
         <button class="btn btn-sm btn-outline-primary" onclick="openReviewModal(${s.id})"><i class="bi bi-eye"></i> View</button>
