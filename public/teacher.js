@@ -280,10 +280,16 @@ async function onActiveClassChange(classId) {
   if (activeTab === '#tab-submissions') await loadSubmissionsLedger();
   if (activeTab === '#tab-builder') await loadExamBuilder();
 
-  loadExamBuilderSilent();
-
+  await loadExamBuilderSilent();
+  if (typeof onBatchClassChanged === 'function') {
+    onBatchClassChanged();
+  }
   if (typeof populateStudentSelect === 'function') {
     populateStudentSelect();
+  }
+  if (typeof resetToLiveCamera === 'function' &&
+      document.getElementById('scanner-video')?.srcObject) {
+    resetToLiveCamera(true);
   }
 }
 
