@@ -363,7 +363,7 @@
               <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-2">
                 <div>
                   <h6 class="fw-bold mb-1"><i class="bi bi-lightning-charge-fill me-1 text-primary"></i> Rapid Batch Scanning</h6>
-                  <div class="text-body-secondary small">Auto-capture, auto-save verified sheets, and review exceptions later.</div>
+                  <div class="text-body-secondary small">Auto-capture and save grades as unpublished drafts. Review exceptions, then publish the completed batch.</div>
                 </div>
                 <div class="form-check form-switch">
                   <input class="form-check-input" type="checkbox" role="switch" id="batch-mode-toggle" onchange="toggleBatchMode(this.checked)">
@@ -371,7 +371,7 @@
                 </div>
               </div>
               <div id="batch-result-status" class="alert alert-secondary py-2 small mb-2" role="status" aria-live="polite">
-                Manual mode is active. Enable Batch Auto-Save to process multiple answer sheets without tapping Save.
+                Manual mode is active. Enable Batch Auto-Save to process multiple sheets. Batch grades remain unpublished until your final confirmation.
               </div>
               <div id="batch-progress" style="display:none">
                 <div class="row g-2 align-items-center mb-2">
@@ -383,12 +383,20 @@
                     <button type="button" class="btn btn-sm btn-outline-secondary" id="btn-batch-pause" onclick="toggleBatchPause()" disabled>Pause Scanning</button>
                     <button type="button" class="btn btn-sm btn-outline-primary" onclick="startNewBatchSession()">New Batch</button>
                     <button type="button" class="btn btn-sm btn-outline-success" onclick="downloadBatchAuditCSV()">Export Batch CSV</button>
+                    <button type="button" class="btn btn-sm btn-success" onclick="publishCurrentBatch()">Publish Verified Grades</button>
                   </div>
+                </div>
+                <div class="mb-2">
+                  <label class="form-label small fw-semibold mb-1" for="batch-session-select">Current / Previous Batch</label>
+                  <select class="form-select form-select-sm" id="batch-session-select" onchange="switchBatchSession(this.value)">
+                    <option value="">No batch selected</option>
+                  </select>
                 </div>
                 <div class="d-flex justify-content-between small fw-semibold mb-1">
                   <span>Saved: <span id="batch-saved-count">0</span> ·
                     Review: <span id="batch-pending-count">0</span> ·
-                    Dismissed: <span id="batch-dismissed-count">0</span></span>
+                    Dismissed: <span id="batch-dismissed-count">0</span> ·
+                    Published: <span id="batch-published-count">0</span></span>
                   <span id="batch-target-progress">0 / 100 saved</span>
                 </div>
                 <div class="progress mb-2" style="height: 7px">
