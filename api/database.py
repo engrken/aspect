@@ -157,19 +157,23 @@ def ensure_seeded(db):
     try:
         faculty = db.query(RosterUser).filter_by(student_id="FACULTY-01").first()
         if not faculty:
-            db.add(RosterUser(
-                student_id="FACULTY-01",
-                email="faculty@filamer.edu.ph",
-                full_name="System Administrator",
-                section="College of Engineering",
-                role="TEACHER",
-                password_hash=hash_password("admin123"),
-                must_change_password=False
-            ))
-            db.commit()
+            bootstrap_password = os.getenv("ASPECT_INITIAL_ADMIN_PASSWORD", "").strip()
+            if len(bootstrap_password) >= 12:
+                db.add(RosterUser(
+                    student_id="FACULTY-01",
+                    email="faculty@filamer.edu.ph",
+                    full_name="System Administrator",
+                    section="College of Engineering",
+                    role="TEACHER",
+                    password_hash=hash_password(bootstrap_password),
+                    must_change_password=True
+                ))
+                db.commit()
+            else:
+                print("ASPECT setup: set ASPECT_INITIAL_ADMIN_PASSWORD (12+ chars) "
+                      "to create the initial administrator; no default admin was created.")
         elif not faculty.password_hash:
-            faculty.password_hash = hash_password("admin123")
-            db.commit()
+            print("ASPECT setup: existing administrator needs manual password recovery.")
     except Exception:
         db.rollback()
 
