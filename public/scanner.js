@@ -9,21 +9,28 @@ let cachedWarpedData = null;
 let lastCapturedDataUrl = null; // local-only; never written to the grade database
 let scannerView = 'corrected';
 let scannerRenderNonce = 0;
-let scannerStartedAt = 0;
 let priorStableCorners = null;
+let awaitingSheetRemoval = false;
+let missingSheetFrames = 0;
 
 // Browser video frames are often much lower-resolution than native phone photos.
 // Keep enough pixels for the printed answer bubbles and QR without huge uploads.
 const MAX_CAPTURE_EDGE = 2560;
 const CAPTURE_JPEG_QUALITY = 0.92;
-const AUTO_FOCUS_SETTLE_MS = 1800;
+// Run frequent lightweight probes, but capture only once geometry and detail
+// are acceptable. Never impose an arbitrary autofocus countdown.
 const PROBE_WIDTH = 640;
+const AUTO_SCAN_INTERVAL_MS = 170;
+const MAX_CORNER_DRIFT_PX = 6;
+// A deliberately conservative low-detail guard; server-side OpenCV still
+// performs the authoritative full-resolution blur check.
+const MIN_DETAIL_EDGE_RATIO = 0.008;
 
 
 let autoScanInterval = null;
 let isScanningFrame = false;
 let stableAlignmentCount = 0;
-const REQUIRED_STABLE_FRAMES = 5;
+const REQUIRED_STABLE_FRAMES = 3;
 
 let nativeBarcodeDetector = null;
 if ('BarcodeDetector' in window) {
@@ -149,7 +156,6 @@ async function initScanner() {
     }
     const info = document.getElementById('scanner-camera-info');
     if (info) info.innerText = `Live camera: ${video.videoWidth} × ${video.videoHeight}. Keep the phone steady and parallel to the page.`;
-    scannerStartedAt = performance.now();
     resetToLiveCamera();
   } catch (err) {
     alert('Cannot open the camera: ' + (err?.message || err) + '. Try Phone Camera instead.');
@@ -161,7 +167,11 @@ function restartCamera() {
   initScanner();
 }
 
-function resetToLiveCamera() {
+function resetToLiveCamera(requireRemoval = false) {
+  // After saving a grade, the same sheet must leave the viewfinder before
+  // a fresh automatic scan can be armed. Manual capture is never blocked.
+  awaitingSheetRemoval = requireRemoval;
+  missingSheetFrames = 0;
   const video = document.getElementById('scanner-video');
   const canvas = document.getElementById('scanner-canvas');
   const overlay = document.getElementById('viewfinder-overlay');
@@ -196,7 +206,7 @@ function resetToLiveCamera() {
   startAutoScanLoop();
 }
 
-function updateTargetUI(isLocked) {
+function updateTargetUI(isLocked, instruction = '') {
   const frame = document.getElementById('viewfinder-frame');
   const brackets = document.querySelectorAll('.target-bracket');
   const label = document.getElementById('align-instruction');
@@ -210,10 +220,35 @@ function updateTargetUI(isLocked) {
       label.innerText = `Keep steady · ${stableAlignmentCount}/${REQUIRED_STABLE_FRAMES}`;
       label.style.color = '#20c997';
     } else {
-      label.innerText = "Fit all 4 outer corner black squares inside the frame";
+      label.innerText = instruction || "Fit all 4 outer corner black squares inside the frame";
       label.style.color = '#ffffff';
     }
   }
+}
+
+/**
+ * Approximate detail from the live preview without transferring the full
+ * camera frame. A low edge ratio indicates a soft / poorly-lit picture.
+ * This does not replace the server-side blur validation on the captured JPEG.
+ */
+function estimateProbeDetail(imgData, W, H) {
+  const data = imgData.data;
+  let edges = 0, samples = 0;
+  const endX = Math.floor(W * 0.84);
+  const endY = Math.floor(H * 0.84);
+  const luminanceAt = (x, y) => {
+    const i = (y * W + x) * 4;
+    return 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  };
+  for (let y = Math.floor(H * 0.16); y < endY; y += 4) {
+    for (let x = Math.floor(W * 0.16); x < endX; x += 4) {
+      const value = luminanceAt(x, y);
+      if (Math.abs(value - luminanceAt(x + 2, y)) +
+          Math.abs(value - luminanceAt(x, y + 2)) > 45) edges++;
+      samples++;
+    }
+  }
+  return samples ? edges / samples : 0;
 }
 
 function startAutoScanLoop() {
@@ -235,30 +270,54 @@ function startAutoScanLoop() {
     probeCtx.drawImage(video, 0, 0, PROBE_WIDTH, probeH);
     const probeImg = probeCtx.getImageData(0, 0, PROBE_WIDTH, probeH);
     const corners = findFourCornersRobust(probeImg, PROBE_WIDTH, probeH);
-    // Do not fire the shutter as soon as a dark square appears: autofocus may
-    // still be hunting and the camera may be in motion.
-    if (corners && performance.now() - scannerStartedAt >= AUTO_FOCUS_SETTLE_MS) {
-      const stable = priorStableCorners && ['tl','tr','bl','br'].every(k =>
-        Math.hypot(corners[k].x - priorStableCorners[k].x,
-                   corners[k].y - priorStableCorners[k].y) < 9);
-      stableAlignmentCount = stable ? stableAlignmentCount + 1 : 1;
-      priorStableCorners = corners;
-      updateTargetUI(true);
-      if (stableAlignmentCount >= REQUIRED_STABLE_FRAMES) {
-        stopAutoScanLoop();
-        if (navigator.vibrate) navigator.vibrate(60);
-        try {
-          await processCameraFrame();
-        } catch (err) {
-          console.error('Automatic scan failed:', err);
-        }
+
+    // A previously submitted sheet must leave the frame before we rearm.
+    // This prevents capturing the same paper again while the phone is still
+    // pointed at it. Re-arm after two absent-marker probes.
+    if (awaitingSheetRemoval) {
+      missingSheetFrames = corners ? 0 : missingSheetFrames + 1;
+      if (missingSheetFrames >= 2) {
+        awaitingSheetRemoval = false;
+        missingSheetFrames = 0;
+        updateTargetUI(false, 'Next sheet: align all four black corner squares');
+      } else {
+        updateTargetUI(false, 'Remove the previous sheet before continuing');
       }
-    } else {
+      return;
+    }
+
+    if (!corners) {
       stableAlignmentCount = 0;
       priorStableCorners = null;
       updateTargetUI(false);
+      return;
     }
-  }, 300);
+
+    if (estimateProbeDetail(probeImg, PROBE_WIDTH, probeH) < MIN_DETAIL_EDGE_RATIO) {
+      stableAlignmentCount = 0;
+      priorStableCorners = null;
+      updateTargetUI(false, 'Improve focus or lighting before scanning');
+      return;
+    }
+
+    const stable = priorStableCorners && ['tl','tr','bl','br'].every(k =>
+      Math.hypot(corners[k].x - priorStableCorners[k].x,
+                 corners[k].y - priorStableCorners[k].y) < MAX_CORNER_DRIFT_PX);
+    stableAlignmentCount = stable ? stableAlignmentCount + 1 : 1;
+    priorStableCorners = corners;
+    updateTargetUI(true);
+
+    if (stableAlignmentCount >= REQUIRED_STABLE_FRAMES) {
+      stopAutoScanLoop();
+      if (navigator.vibrate) navigator.vibrate(60);
+      try {
+        await processCameraFrame();
+      } catch (err) {
+        console.error('Automatic scan failed:', err);
+        resetToLiveCamera();
+      }
+    }
+  }, AUTO_SCAN_INTERVAL_MS);
 }
 
 function stopAutoScanLoop() {
@@ -705,7 +764,7 @@ async function submitScannedResult() {
       document.getElementById('scan-detected-id').value = "";
       document.getElementById('scan-student-select').value = "";
       matchAndDisplayStudent('', false);
-      resetToLiveCamera();
+      resetToLiveCamera(true);
     } else {
       alert("Submission Error: " + res.message);
     }
