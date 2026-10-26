@@ -78,7 +78,7 @@ def validate_token(db: Session, token: Optional[str]):
 def can_scan_class(db, user, class_id):
     cls = db.query(CourseClass).filter_by(class_id=class_id).first()
     if not cls or (user.student_id.upper() != "FACULTY-01" and
-                   cls.owner_teacher_id.upper() != user.student_id.upper()):
+                   (cls.owner_teacher_id or "").upper() != user.student_id.upper()):
         return None
     return cls
 
@@ -102,7 +102,8 @@ def resolve_enrolled_student(db, class_id, student_id):
 
 
 def save_scanner_grade(db, class_id, student, test_set, answers, image,
-                       breakdown, allow_overwrite=False, published=True):
+                       breakdown, allow_overwrite=False, published=True,
+                       origin_scan_id=""):
     """Single serialized grade write. Never overwrite silently, including on retries."""
     sid = canonical_student_id(student.student_id)
     db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
@@ -134,6 +135,7 @@ def save_scanner_grade(db, class_id, student, test_set, answers, image,
     record.percentage = pct
     record.is_passed = passed
     record.is_published = bool(published)
+    record.origin_scan_id = origin_scan_id or ""
     record.answers = answer_map
     if image:
         record.scanned_image = image.split(",", 1)[-1] if image.startswith("data:") else image
@@ -654,7 +656,8 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                 return {"success": False, "message": "Student is not enrolled in this class."}
             result = save_scanner_grade(db, payload.classId, student, key,
                                         answers, preview, breakdown, overwrite,
-                                        published=(job is None))
+                                        published=(job is None),
+                                        origin_scan_id=(job.id if job else ""))
             if result["success"]:
                 if job:
                     job.status = "SAVED"
@@ -751,6 +754,9 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                     Submission.student_id.ilike(j.student_id)
                 ).first()
                 if submission:
+                    if submission.origin_scan_id != j.id:
+                        return {"success": False, "message": "A grade in this batch was replaced "
+                                "by another scan. Review the newer batch before publishing."}
                     submission.is_published = True
                     j.published = True
                     j.published_by = user.student_id
@@ -802,7 +808,8 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             result = save_scanner_grade(
                 db, job.class_id, student, exam_set, answers,
                 job.scanned_image, job.item_breakdown,
-                bool(payload.allowOverwrite), published=False
+                bool(payload.allowOverwrite), published=False,
+                origin_scan_id=job.id
             )
             if result["success"]:
                 job.status = "SAVED"
