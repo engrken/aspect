@@ -1,0 +1,45 @@
+name: ASPECT Scanner Regression
+
+on:
+  pull_request:
+    paths:
+      - 'api/**'
+      - 'public/**'
+      - 'tests/**'
+      - '.github/workflows/aspect-scanner-ci.yml'
+      - 'requirements.txt'
+  push:
+    branches:
+      - 'feature/reactive-auto-capture-20261026'
+
+permissions:
+  contents: read
+
+jobs:
+  scanner-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Static JavaScript checks
+        run: |
+          node --check public/scanner.js
+          node --check public/batch_scanner.js
+          node --check public/teacher.js
+      - name: Browser scanner tests
+        run: |
+          node tests/test_capture_browser.js
+          node tests/test_batch_browser.js
+      - name: Python OMR and grade safety tests
+        run: python -m unittest discover -s tests -v
