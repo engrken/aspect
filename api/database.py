@@ -90,6 +90,7 @@ class Submission(Base):
     percentage = Column(Float)
     is_passed = Column(Boolean)
     is_published = Column(Boolean, default=True)
+    origin_scan_id = Column(String, default="")
     answers = Column(JSON)
     scanned_image = Column(String, default="")
     item_breakdown = Column(JSON, default=[])
@@ -129,7 +130,8 @@ def ensure_seeded(db):
         "ALTER TABLE roster ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN DEFAULT FALSE",
         "ALTER TABLE exam_submissions ADD COLUMN IF NOT EXISTS scanned_image TEXT DEFAULT ''",
         "ALTER TABLE exam_submissions ADD COLUMN IF NOT EXISTS item_breakdown JSON",
-        "ALTER TABLE exam_submissions ADD COLUMN IF NOT EXISTS is_published BOOLEAN DEFAULT TRUE"
+        "ALTER TABLE exam_submissions ADD COLUMN IF NOT EXISTS is_published BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE exam_submissions ADD COLUMN IF NOT EXISTS origin_scan_id VARCHAR DEFAULT ''"
     ]
     
     for query in migrations:
