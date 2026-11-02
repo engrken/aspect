@@ -6,21 +6,62 @@
     {
       "source": "/(.*)",
       "headers": [
-        { "key": "X-Content-Type-Options", "value": "nosniff" },
-        { "key": "X-Frame-Options", "value": "DENY" },
-        { "key": "Permissions-Policy", "value": "camera=(self)" }
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "X-Frame-Options",
+          "value": "DENY"
+        },
+        {
+          "key": "Permissions-Policy",
+          "value": "camera=(self)"
+        }
       ]
     }
   ],
   "rewrites": [
-    { "source": "/api", "destination": "/api/index.py" },
-    { "source": "/api/(.*)", "destination": "/api/index.py" },
-    { "source": "/", "destination": "/public/index.html" },
-    { "source": "/index.html", "destination": "/public/index.html" },
-    { "source": "/teacher.html", "destination": "/public/teacher.html" },
-    { "source": "/print_sheets.html", "destination": "/public/print_sheets.html" },
-    { "source": "/js/(.*)", "destination": "/public/js/$1" },
-    { "source": "/css/(.*)", "destination": "/public/css/$1" },
-    { "source": "/(.*)", "destination": "/public/$1" }
-  ]
+    {
+      "source": "/api",
+      "destination": "/api/index.py"
+    },
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index.py"
+    },
+    {
+      "source": "/",
+      "destination": "/public/index.html"
+    },
+    {
+      "source": "/index.html",
+      "destination": "/public/index.html"
+    },
+    {
+      "source": "/teacher.html",
+      "destination": "/public/teacher.html"
+    },
+    {
+      "source": "/print_sheets.html",
+      "destination": "/public/print_sheets.html"
+    },
+    {
+      "source": "/js/(.*)",
+      "destination": "/public/js/$1"
+    },
+    {
+      "source": "/css/(.*)",
+      "destination": "/public/css/$1"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/public/$1"
+    }
+  ],
+  "git": {
+    "deploymentEnabled": {
+      "education-development-setup": false
+    }
+  }
 }
