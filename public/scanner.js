@@ -530,6 +530,9 @@ function drawValidationOverlays(ctx, itemBreakdown) {
   if (!itemBreakdown || !Array.isArray(itemBreakdown)) return;
   const isForm100 = itemBreakdown.length > 50;
   itemBreakdown.forEach(ib => {
+    // Keep instructor-reviewed answers out of the original machine overlay:
+    // prior red/green circles may no longer describe the corrected decision.
+    if (ib.reviewRequired && ib.reviewed) return;
     if (!ib.bubbles) return;
     ib.bubbles.forEach(b => {
       ctx.save();
