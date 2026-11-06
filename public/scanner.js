@@ -23,6 +23,25 @@ let isScanningFrame = false;
 let stableAlignmentCount = 0;
 const REQUIRED_STABLE_FRAMES = 3;
 
+let qrLibraryPromise = null;
+function ensureScannerQrLibrary() {
+  if (typeof jsQR !== 'undefined') return Promise.resolve();
+  if (!qrLibraryPromise) {
+    qrLibraryPromise = new Promise(resolve => {
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js';
+      script.async = true;
+      script.onload = resolve;
+      script.onerror = () => {
+        console.warn('jsQR unavailable; native browser and server-side QR readers remain active.');
+        resolve();
+      };
+      document.head.appendChild(script);
+    });
+  }
+  return qrLibraryPromise;
+}
+
 let nativeBarcodeDetector = null;
 if ('BarcodeDetector' in window) {
   try { nativeBarcodeDetector = new BarcodeDetector({ formats: ['qr_code'] }); }
@@ -104,10 +123,12 @@ async function initScanner() {
     videoStream = null;
   }
 
-  if (enrolledStudentsList.length === 0 && activeClassId) {
+  if (!isRosterLoaded && activeClassId) {
     if (typeof loadSubjectEnrollment === 'function') await loadSubjectEnrollment();
   }
   populateStudentSelect();
+  // Load QR fallback in parallel with opening the camera, not on every page visit.
+  void ensureScannerQrLibrary();
 
   if (!navigator.mediaDevices?.getUserMedia) {
     alert('Browser camera is unavailable. Use the Phone Camera button to take a photo instead.');
