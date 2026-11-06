@@ -8,6 +8,7 @@ let sessionToken = localStorage.getItem('aspect_token') || null;
 let authModal = null;
 let forcePasswordModal = null;
 let currentStudentResults = [];
+let resultsRequestSequence = 0;
 
 async function callApi(payload) {
   try {
@@ -315,6 +316,8 @@ function logout() {
     localStorage.removeItem('aspect_token');
     sessionToken = null;
     currentUser = null;
+    currentStudentResults = [];
+    resultsRequestSequence++;
     showGuestState();
   }
 }
@@ -396,10 +399,13 @@ async function unenrollClass(classId) {
 
 async function loadStudentResults() {
   const container = document.getElementById('results-container');
+  const sequence = ++resultsRequestSequence;
+  const token = sessionToken;
   container.innerHTML = `<div class="col-12 text-center py-5 text-secondary"><div class="spinner-border text-primary mb-3" style="width: 2.5rem; height: 2.5rem;"></div><br><span class="fw-semibold">Retrieving examination records...</span></div>`;
 
   try {
-    const res = await callApi({ action: 'GET_STUDENT_RESULTS', sessionToken: sessionToken });
+    const res = await callApi({ action: 'GET_STUDENT_RESULTS', sessionToken: token });
+    if (sequence !== resultsRequestSequence || token !== sessionToken) return;
     if (res.success) {
       currentStudentResults = res.results;
       renderResults(currentStudentResults);
@@ -407,7 +413,9 @@ async function loadStudentResults() {
       container.innerHTML = `<div class="col-12 alert alert-danger">${res.message}</div>`;
     }
   } catch (err) {
-    container.innerHTML = `<div class="col-12 alert alert-danger">Connection error: ${err}</div>`;
+    if (sequence === resultsRequestSequence && token === sessionToken) {
+      container.innerText = 'Could not load examination records. Please refresh the page.';
+    }
   }
 }
 
@@ -428,9 +436,10 @@ function renderResults(results) {
     return;
   }
 
+  const fragment = document.createDocumentFragment();
   results.forEach(item => {
     const isPassed = item.status === 'PASSED';
-    const hasImage = item.scannedImage && item.scannedImage.length > 50;
+    const hasImage = item.hasScannedImage || !!item.scannedImage;
     
     const card = document.createElement('div');
     card.className = "col-md-6 col-lg-4";
@@ -466,27 +475,48 @@ function renderResults(results) {
         </div>
       </div>
     `;
-    container.appendChild(card);
+    fragment.appendChild(card);
   });
+  container.appendChild(fragment);
 }
 
-function viewStudentSheet(subId) {
+async function viewStudentSheet(subId) {
   const item = currentStudentResults.find(r => r.id === subId);
-  if (!item || !item.scannedImage) return;
+  if (!item) return;
+  const token = sessionToken;
+  if (!item.scannedImage) {
+    // Reuse an in-flight detail request if the View Sheet button was tapped twice.
+    if (!item._detailPromise) {
+      item._detailPromise = callApi({ action: 'GET_SUBMISSION_DETAIL',
+        sessionToken: token, submissionId: subId }).finally(() => { item._detailPromise = null; });
+    }
+    const res = await item._detailPromise;
+    if (token !== sessionToken || !currentStudentResults.includes(item)) return;
+    if (!res.success || !res.scannedImage) {
+      alert(res.message || 'The scanned image is unavailable.');
+      return;
+    }
+    item.scannedImage = res.scannedImage;
+    item.itemBreakdown = res.itemBreakdown || [];
+  }
 
   const canvas = document.getElementById('student-sheet-canvas');
   const ctx = canvas.getContext('2d');
-  
   const img = new Image();
   img.onload = () => {
+    if (token !== sessionToken) return;
     canvas.width = img.width;
     canvas.height = img.height;
     ctx.drawImage(img, 0, 0);
     if (item.itemBreakdown) {
+      ctx.save();
+      ctx.scale(img.width / 400, img.height / (item.itemBreakdown.length > 50 ? 570 : 450));
       drawValidationOverlays(ctx, item.itemBreakdown);
+      ctx.restore();
     }
     new bootstrap.Modal(document.getElementById('view-sheet-modal')).show();
   };
+  img.onerror = () => alert('Could not display the scanned image.');
   img.src = "data:image/jpeg;base64," + item.scannedImage;
 }
 
