@@ -9,21 +9,38 @@ let cachedWarpedData = null;
 let lastCapturedDataUrl = null; // local-only; never written to the grade database
 let scannerView = 'corrected';
 let scannerRenderNonce = 0;
-let scannerStartedAt = 0;
 let priorStableCorners = null;
 
 // Browser video frames are often much lower-resolution than native phone photos.
 // Keep enough pixels for the printed answer bubbles and QR without huge uploads.
 const MAX_CAPTURE_EDGE = 2560;
 const CAPTURE_JPEG_QUALITY = 0.92;
-const AUTO_FOCUS_SETTLE_MS = 1800;
 const PROBE_WIDTH = 640;
 
 
 let autoScanInterval = null;
 let isScanningFrame = false;
 let stableAlignmentCount = 0;
-const REQUIRED_STABLE_FRAMES = 5;
+const REQUIRED_STABLE_FRAMES = 3;
+
+let qrLibraryPromise = null;
+function ensureScannerQrLibrary() {
+  if (typeof jsQR !== 'undefined') return Promise.resolve();
+  if (!qrLibraryPromise) {
+    qrLibraryPromise = new Promise(resolve => {
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js';
+      script.async = true;
+      script.onload = resolve;
+      script.onerror = () => {
+        console.warn('jsQR unavailable; native browser and server-side QR readers remain active.');
+        resolve();
+      };
+      document.head.appendChild(script);
+    });
+  }
+  return qrLibraryPromise;
+}
 
 let nativeBarcodeDetector = null;
 if ('BarcodeDetector' in window) {
@@ -94,7 +111,7 @@ function matchAndDisplayStudent(studentId, isQrVerified) {
 
   if (lastScannedData) {
     lastScannedData.studentId = studentId;
-    if (saveBtn) saveBtn.disabled = false;
+    updateSaveScanState();
   }
 }
 
@@ -106,10 +123,12 @@ async function initScanner() {
     videoStream = null;
   }
 
-  if (enrolledStudentsList.length === 0 && activeClassId) {
+  if (!isRosterLoaded && activeClassId) {
     if (typeof loadSubjectEnrollment === 'function') await loadSubjectEnrollment();
   }
   populateStudentSelect();
+  // Load QR fallback in parallel with opening the camera, not on every page visit.
+  void ensureScannerQrLibrary();
 
   if (!navigator.mediaDevices?.getUserMedia) {
     alert('Browser camera is unavailable. Use the Phone Camera button to take a photo instead.');
@@ -149,7 +168,6 @@ async function initScanner() {
     }
     const info = document.getElementById('scanner-camera-info');
     if (info) info.innerText = `Live camera: ${video.videoWidth} × ${video.videoHeight}. Keep the phone steady and parallel to the page.`;
-    scannerStartedAt = performance.now();
     resetToLiveCamera();
   } catch (err) {
     alert('Cannot open the camera: ' + (err?.message || err) + '. Try Phone Camera instead.');
@@ -183,6 +201,11 @@ function resetToLiveCamera() {
 
   const breakdownContainer = document.getElementById('ai-breakdown-container');
   if (breakdownContainer) breakdownContainer.innerHTML = '<span class="text-muted d-block text-center py-2">No scan data yet.</span>';
+  const reviewSummary = document.getElementById('scan-review-summary');
+  if (reviewSummary) {
+    reviewSummary.className = 'small mt-1 text-body-secondary';
+    reviewSummary.innerText = 'Free local OMR review detects uncertain markings before saving.';
+  }
 
   lastScannedData = null;
   cachedWarpedData = null;
@@ -235,9 +258,9 @@ function startAutoScanLoop() {
     probeCtx.drawImage(video, 0, 0, PROBE_WIDTH, probeH);
     const probeImg = probeCtx.getImageData(0, 0, PROBE_WIDTH, probeH);
     const corners = findFourCornersRobust(probeImg, PROBE_WIDTH, probeH);
-    // Do not fire the shutter as soon as a dark square appears: autofocus may
-    // still be hunting and the camera may be in motion.
-    if (corners && performance.now() - scannerStartedAt >= AUTO_FOCUS_SETTLE_MS) {
+    // No fixed autofocus delay: three consecutive stable, aligned video frames
+    // trigger capture. The server independently rejects blurry photographs.
+    if (corners) {
       const stable = priorStableCorners && ['tl','tr','bl','br'].every(k =>
         Math.hypot(corners[k].x - priorStableCorners[k].x,
                    corners[k].y - priorStableCorners[k].y) < 9);
@@ -258,7 +281,7 @@ function startAutoScanLoop() {
       priorStableCorners = null;
       updateTargetUI(false);
     }
-  }, 300);
+  }, 250);
 }
 
 function stopAutoScanLoop() {
@@ -528,6 +551,9 @@ function drawValidationOverlays(ctx, itemBreakdown) {
   if (!itemBreakdown || !Array.isArray(itemBreakdown)) return;
   const isForm100 = itemBreakdown.length > 50;
   itemBreakdown.forEach(ib => {
+    // Keep instructor-reviewed answers out of the original machine overlay:
+    // prior red/green circles may no longer describe the corrected decision.
+    if (ib.reviewRequired && ib.reviewed) return;
     if (!ib.bubbles) return;
     ib.bubbles.forEach(b => {
       ctx.save();
@@ -543,6 +569,117 @@ function drawValidationOverlays(ctx, itemBreakdown) {
       ctx.restore();
     });
   });
+}
+
+
+function pendingScanReviews() {
+  if (!lastScannedData?.itemBreakdown) return 0;
+  return lastScannedData.itemBreakdown.filter(row => row.reviewRequired && !row.reviewed).length;
+}
+
+function updateSaveScanState() {
+  const btn = document.getElementById('btn-save-scan');
+  if (btn) btn.disabled = !lastScannedData ||
+    !document.getElementById('scan-detected-id')?.value?.trim() ||
+    pendingScanReviews() > 0;
+}
+
+function escapeScanHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, char => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[char]);
+}
+
+function recomputeScanScores() {
+  if (!lastScannedData) return;
+  let score = 0;
+  let total = 0;
+  lastScannedData.itemBreakdown.forEach(ib => {
+    const points = Math.max(0, Number(ib.points ?? 1));
+    const answer = String(lastScannedData.answers[String(ib.itemNo)] || '').toUpperCase();
+    const correct = String(ib.correctAnswer || '').toUpperCase();
+    const permitted = ib.type === 'TF' ? ['T', 'F'] : ['A', 'B', 'C', 'D'];
+    ib.isCorrect = permitted.includes(answer) &&
+      (answer === correct || correct === '*' || correct === 'ALL');
+    if (ib.isCorrect) score += points;
+    total += points;
+  });
+  const percentage = total ? Math.round((score / total) * 10000) / 100 : 0;
+  lastScannedData.rawScore = score;
+  lastScannedData.totalPoints = total;
+  lastScannedData.percentage = percentage;
+  lastScannedData.isPassed = percentage >= Number(lastScannedData.passingPercentage ?? 70);
+}
+
+function renderScanGradeSummary() {
+  if (!lastScannedData) return;
+  const data = lastScannedData;
+  const pending = pendingScanReviews();
+  document.getElementById('scan-score-display').innerText = data.rawScore + ' / ' + data.totalPoints;
+  document.getElementById('scan-grade-display').innerHTML =
+    '<div class="d-flex align-items-center justify-content-center gap-2 mb-1">' +
+      '<span class="badge ' + (pending ? 'bg-warning text-dark' : (data.isPassed ? 'bg-success' : 'bg-danger')) +
+      ' fs-6">' + (pending ? 'REVIEW REQUIRED' : (data.isPassed ? 'PASSED' : 'FAILED')) + '</span>' +
+      '<span class="fw-bold fs-5">' + data.percentage + '%</span></div>';
+  const summary = document.getElementById('scan-review-summary');
+  if (summary) {
+    summary.className = 'small mt-1 ' + (pending ? 'text-warning-emphasis fw-bold' : 'text-success');
+    summary.innerText = pending
+      ? pending + ' uncertain answer(s): review each before saving.'
+      : 'Local scan verified. Check the student and score before saving.';
+  }
+}
+
+function renderScanItemReview() {
+  const container = document.getElementById('ai-breakdown-container');
+  if (!container || !lastScannedData) return;
+  const rows = lastScannedData.itemBreakdown;
+  let html = '<table class="table table-sm table-borderless mb-0" style="font-size:0.73rem;">' +
+    '<thead class="table-light sticky-top"><tr><th>Item</th><th>Mark / Review</th><th>Key</th><th>Result</th></tr></thead><tbody>';
+  rows.forEach(ib => {
+    html += '<tr' + (ib.reviewRequired ? ' class="table-warning"' : '') + '><td>#' +
+      Number(ib.itemNo) + '</td><td>';
+    if (ib.reviewRequired) {
+      const choices = ib.type === 'TF' ? ['T', 'F'] : ['A', 'B', 'C', 'D'];
+      const options = [
+        ['__PENDING__', 'Choose reviewed answer'],
+        ['__BLANK__', 'Blank / no answer'],
+        ['INVALID', 'Multiple / invalid']
+      ].concat(choices.map(choice => [choice, choice]));
+      html += '<select class="form-select form-select-sm py-0" aria-label="Review item ' + Number(ib.itemNo) +
+        '" onchange="resolveReviewItem(' + Number(ib.itemNo) + ', this.value)">';
+      options.forEach(option => {
+        const selected = ib.reviewed ? ib.reviewChoice === option[0] : option[0] === '__PENDING__';
+        html += '<option value="' + option[0] + '"' + (selected ? ' selected' : '') + '>' + option[1] + '</option>';
+      });
+      html += '</select><div class="small text-muted">Scan: ' + escapeScanHtml(ib.scanAnswer || ib.studentAnswer) +
+        ' · ' + escapeScanHtml(ib.reviewReason || 'Uncertain mark') + '</div>';
+    } else {
+      html += '<strong>' + escapeScanHtml(ib.studentAnswer || '(Blank)') + '</strong>';
+    }
+    html += '</td><td class="text-primary fw-bold">' + escapeScanHtml(ib.correctAnswer) + '</td>' +
+      '<td class="' + (ib.reviewRequired && !ib.reviewed ? 'text-warning' :
+        (ib.isCorrect ? 'text-success' : 'text-danger')) + ' fw-bold">' +
+      (ib.reviewRequired && !ib.reviewed ? 'Review' : (ib.isCorrect ? '✓' : '✕')) + '</td></tr>';
+  });
+  container.innerHTML = html + '</tbody></table>';
+}
+
+function resolveReviewItem(itemNo, decision) {
+  if (!lastScannedData || decision === '__PENDING__') return;
+  const ib = lastScannedData.itemBreakdown.find(row => Number(row.itemNo) === Number(itemNo));
+  if (!ib || !ib.reviewRequired) return;
+  ib.reviewed = true;
+  ib.reviewChoice = decision;
+  const answer = decision === '__BLANK__' ? '' : decision;
+  if (answer) lastScannedData.answers[String(itemNo)] = answer;
+  else delete lastScannedData.answers[String(itemNo)];
+  ib.studentAnswer = decision === '__BLANK__' ? '(Blank)' :
+    (decision === 'INVALID' ? '(Multiple / Invalid)' : decision);
+  recomputeScanScores();
+  renderScanItemReview();
+  renderScanGradeSummary();
+  updateSaveScanState();
 }
 
 async function processCameraFrame(preDetectedCorners = null, suppliedCanvas = null) {
@@ -628,32 +765,6 @@ async function processCameraFrame(preDetectedCorners = null, suppliedCanvas = nu
     matchAndDisplayStudent(res.studentId, qrMatches);
   }
 
-  document.getElementById('scan-score-display').innerText = `${res.rawScore} / ${res.totalPoints}`;
-  document.getElementById('scan-grade-display').innerHTML = `
-    <div class="d-flex align-items-center justify-content-center gap-2 mb-1">
-      <span class="badge ${res.isPassed ? 'bg-success' : 'bg-danger'} fs-6">${res.status}</span>
-      <span class="fw-bold fs-5">${res.percentage}%</span>
-    </div>
-  `;
-
-  const breakdownContainer = document.getElementById('ai-breakdown-container');
-  if (breakdownContainer && res.itemBreakdown) {
-    let html = `<table class="table table-sm table-borderless mb-0" style="font-size: 0.73rem;">
-      <thead class="table-light sticky-top"><tr><th>Item</th><th>Mark</th><th>Key</th><th>Result</th></tr></thead><tbody>`;
-    res.itemBreakdown.forEach(ib => {
-      html += `<tr>
-        <td>#${ib.itemNo}</td>
-        <td class="fw-bold">${ib.studentAnswer || '-'}</td>
-        <td class="text-primary fw-bold">${ib.correctAnswer}</td>
-        <td class="${ib.isCorrect ? 'text-success fw-bold' : 'text-danger fw-bold'}">
-          <i class="bi bi-${ib.isCorrect ? 'check-circle-fill' : 'x-circle-fill'}"></i>
-        </td>
-      </tr>`;
-    });
-    html += `</tbody></table>`;
-    breakdownContainer.innerHTML = html;
-  }
-
   lastScannedData = {
     classId: activeClassId,
     studentId: res.studentId || activeStudentId,
@@ -664,20 +775,23 @@ async function processCameraFrame(preDetectedCorners = null, suppliedCanvas = nu
     percentage: res.percentage,
     isPassed: res.isPassed,
     warpedBase64: res.warpedBase64,
-    itemBreakdown: res.itemBreakdown
+    itemBreakdown: res.itemBreakdown || [],
+    passingPercentage: res.passingPercentage ?? 70
   };
 
+  recomputeScanScores();
+  renderScanItemReview();
+  renderScanGradeSummary();
   renderScanPreview();
   const cameraInfo = document.getElementById('scanner-camera-info');
   if (cameraInfo) cameraInfo.innerText =
     `Captured: ${rawCanvas.width} × ${rawCanvas.height} · Graded sheet aligned by OpenCV. Review both views before saving.`;
-  if (lastScannedData.studentId) {
-    document.getElementById('btn-save-scan').disabled = false;
-  }
+  updateSaveScanState();
 }
 
 async function submitScannedResult() {
   if (!lastScannedData) return;
+  if (pendingScanReviews()) return alert('Review every uncertain answer before saving this grade.');
   const studentId = document.getElementById('scan-detected-id').value.trim();
   if (!studentId) return alert("Select or scan an examinee before saving.");
 
@@ -698,7 +812,7 @@ async function submitScannedResult() {
       itemBreakdown: lastScannedData.itemBreakdown
     });
 
-    btn.disabled = false;
+    updateSaveScanState();
     btn.innerHTML = `<i class="bi bi-cloud-arrow-up-fill me-1"></i> Save Grade to Roster`;
 
     if (res.success) {
@@ -710,7 +824,7 @@ async function submitScannedResult() {
       alert("Submission Error: " + res.message);
     }
   } catch (err) {
-    btn.disabled = false;
+    updateSaveScanState();
     btn.innerHTML = `<i class="bi bi-cloud-arrow-up-fill me-1"></i> Save Grade to Roster`;
     alert("Connection error: " + err);
   }

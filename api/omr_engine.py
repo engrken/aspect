@@ -191,6 +191,23 @@ def detect_shaded_test_set(blurred_img, default_set='A'):
         pass
     return str(default_set or 'A').upper()
 
+def mark_review_reason(contrast, separation, darkest_lum, is_double, answer, question_type):
+    """Conservative, explainable mark-quality assessment (not ML probability).
+
+    Only uncertain cases require human review. Clear blanks do not, so a student
+    may deliberately skip items without being forced through a review of each.
+    """
+    if is_double:
+        return "Two or more dark choices detected"
+    if question_type == 'TF' and answer in ('C', 'D'):
+        return "Mark is outside the True/False options"
+    if answer and (separation < 14.0 or contrast < 26.0 or darkest_lum > 136.0):
+        return "Answer is faint or insufficiently separated from another option"
+    if not answer and 12.0 <= contrast < 18.0 and darkest_lum < 155.0:
+        return "Possible faint or erased answer near the recognition threshold"
+    return None
+
+
 def grade_sheet_opencv(image_bytes, items, test_set):
     np_arr = np.frombuffer(image_bytes, np.uint8)
     raw_img = cv2.imdecode(np_arr, cv2.IMREAD_GRAYSCALE)
@@ -325,6 +342,11 @@ def grade_sheet_opencv(image_bytes, items, test_set):
             elif normalized_ans == 'B':
                 normalized_ans = 'F'
 
+        review_reason = mark_review_reason(
+            drop_from_lightest, separation, darkest['lum'],
+            is_double_shaded, normalized_ans, q_type
+        )
+
         is_correct = bool(
             normalized_ans
             and not is_double_shaded
@@ -368,7 +390,13 @@ def grade_sheet_opencv(image_bytes, items, test_set):
             'studentAnswer': normalized_ans or '(Blank)',
             'correctAnswer': correct_ans,
             'isCorrect': is_correct,
-            'bubbles': bubbles_overlay
+            'bubbles': bubbles_overlay,
+            'points': pts,
+            'type': q_type,
+            'scanAnswer': normalized_ans or '(Blank)',
+            'reviewRequired': bool(review_reason),
+            'reviewReason': review_reason or '',
+            'reviewed': False
         })
 
     return detected_answers, raw_score, total_points, item_breakdown, detected_qr_id, warped_b64, active_set

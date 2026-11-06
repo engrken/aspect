@@ -69,5 +69,25 @@ vm.runInContext(code,context);
   await vm.runInContext('toggleScanPhoto()',context);
   assert.equal(element('btn-toggle-scan-photo').innerText,'View Graded Sheet');
   assert(drawEvents.length >= 3);
-  console.log('Browser mocked-capture tests passed.');
+
+  // A doubtful (double-marked) answer must prevent saving until resolved.
+  context.callApi = async () => ({
+    success:true,studentId:'S0001',detectedTestSet:'A',warpedBase64:'WARPED',
+    answers:{'1':'A,B'},rawScore:0,totalPoints:1,percentage:0,isPassed:false,
+    passingPercentage:70,reviewRequired:true,reviewCount:1,
+    itemBreakdown:[{itemNo:1,studentAnswer:'A,B',scanAnswer:'A,B',
+      correctAnswer:'A',isCorrect:false,bubbles:[],points:1,type:'MCQ',
+      reviewRequired:true,reviewReason:'Two or more dark choices detected',reviewed:false}],
+    status:'FAILED'
+  });
+  vm.runInContext('resetToLiveCamera()',context);
+  await vm.runInContext('processCameraFrame()',context);
+  assert.equal(element('btn-save-scan').disabled,true,'Unreviewed scans must not be saved');
+  assert.equal(element('scan-grade-display').innerHTML.includes('REVIEW REQUIRED'),true);
+  vm.runInContext("resolveReviewItem(1, 'A')",context);
+  assert.equal(element('btn-save-scan').disabled,false,'Teacher review allows saving');
+  assert.equal(element('scan-score-display').innerText,'1 / 1');
+  assert.equal(vm.runInContext('lastScannedData.answers["1"]',context),'A');
+
+  console.log('Browser mocked-capture and review tests passed.');
 })().catch(e=>{console.error(e);process.exit(1);});

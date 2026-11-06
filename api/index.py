@@ -5,6 +5,7 @@ from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 try:
     from .database import (
@@ -226,8 +227,20 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             user = validate_token(db, payload.sessionToken)
             if not user:
                 return {"success": False, "message": "Invalid session."}
-            subs = db.query(Submission).filter(Submission.student_id.ilike(user.student_id)).order_by(Submission.timestamp.desc()).all()
-            classes = {c.class_id: c for c in db.query(CourseClass).all()}
+            # The list must never fetch base64 scan images or per-bubble JSON.
+            # Fetch the image/overlays for one authorized submission on demand.
+            subs = db.query(
+                Submission.id, Submission.class_id, Submission.section,
+                Submission.test_set, Submission.raw_score, Submission.total_points,
+                Submission.percentage, Submission.timestamp, Submission.is_passed,
+                func.coalesce(func.length(Submission.scanned_image), 0).label("image_length")
+            ).filter(
+                Submission.student_id.ilike(user.student_id)
+            ).order_by(Submission.timestamp.desc()).all()
+            class_ids = {s.class_id for s in subs}
+            classes = {c.class_id: c for c in db.query(CourseClass).filter(
+                CourseClass.class_id.in_(class_ids)
+            ).all()} if class_ids else {}
             results = []
             for s in subs:
                 c_meta = classes.get(s.class_id)
@@ -243,8 +256,7 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                     "percentage": f"{s.percentage}%",
                     "timestamp": s.timestamp.strftime("%Y-%m-%d %H:%M"),
                     "status": "PASSED" if s.is_passed else "FAILED",
-                    "scannedImage": s.scanned_image,
-                    "itemBreakdown": s.item_breakdown
+                    "hasScannedImage": s.image_length > 0
                 })
             return {
                 "success": True,
@@ -254,6 +266,32 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                     "section": user.section
                 },
                 "results": results
+            }
+
+        elif act == "GET_SUBMISSION_DETAIL":
+            user = validate_token(db, payload.sessionToken)
+            if not user or not payload.submissionId:
+                return {"success": False, "message": "Login and submission ID required."}
+            sub = db.query(Submission).filter_by(id=payload.submissionId).first()
+            if not sub:
+                return {"success": False, "message": "Submission not found."}
+            if user.role == "STUDENT":
+                authorized = sub.student_id.upper() == user.student_id.upper()
+            elif user.role == "TEACHER":
+                owner = db.query(CourseClass.owner_teacher_id).filter_by(
+                    class_id=sub.class_id
+                ).scalar()
+                authorized = user.student_id.upper() == "FACULTY-01" or owner == user.student_id
+            else:
+                authorized = False
+            if not authorized:
+                return {"success": False, "message": "Not authorized to access this answer sheet."}
+            return {
+                "success": True,
+                "id": sub.id,
+                "scannedImage": sub.scanned_image or "",
+                "itemBreakdown": sub.item_breakdown or [],
+                "answers": sub.answers or {}
             }
 
         elif act == "GET_AVAILABLE_CLASSES":
@@ -305,9 +343,14 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                 classes = db.query(CourseClass).all()
             else:
                 classes = db.query(CourseClass).filter_by(owner_teacher_id=user.student_id).all()
+            # Avoid one COUNT query per subject on faculty dashboard startup.
+            ids = [c.class_id for c in classes]
+            counts = dict(db.query(ExamItem.class_id, func.count(ExamItem.id)).filter(
+                ExamItem.class_id.in_(ids)
+            ).group_by(ExamItem.class_id).all()) if ids else {}
             res_list = []
             for c in classes:
-                cnt = db.query(ExamItem).filter_by(class_id=c.class_id).count()
+                cnt = counts.get(c.class_id, 0)
                 res_list.append({
                     "classId": c.class_id,
                     "subjectCode": c.subject_code,
@@ -457,19 +500,27 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             return {"success": True, "message": f"Import complete: {added} new students added, {updated} updated. Default password is 'student123'."}
 
         elif act == "AI_VISION_GRADE":
+            faculty = validate_token(db, payload.sessionToken)
+            if not faculty or faculty.role != "TEACHER":
+                return {"success": False, "message": "Faculty login required to scan examinations."}
+            cls_obj = db.query(CourseClass).filter_by(class_id=payload.classId).first()
+            if not cls_obj or cls_obj.owner_teacher_id != faculty.student_id:
+                return {"success": False, "message": "Exam class not available to this faculty account."}
+            if not payload.base64Image:
+                return {"success": False, "message": "No examination image supplied."}
             encoded = payload.base64Image.split(",")[1] if "," in payload.base64Image else payload.base64Image
-            img_bytes = base64.b64decode(encoded)
-            items = payload.items or []
-            if not items and payload.classId:
-                db_items = db.query(ExamItem).filter_by(class_id=payload.classId).order_by(ExamItem.item_no.asc()).all()
-                items = [{"itemNo": i.item_no, "type": i.type, "points": i.points, "setA": i.set_a, "setB": i.set_b} for i in db_items]
+            img_bytes = base64.b64decode(encoded, validate=True)
+            db_items = db.query(ExamItem).filter_by(class_id=payload.classId).order_by(ExamItem.item_no.asc()).all()
+            if not db_items:
+                return {"success": False, "message": "Save the class exam answer key before scanning."}
+            # The database is authoritative: never accept answer keys embedded in a browser request.
+            items = [{"itemNo": i.item_no, "type": i.type, "points": i.points, "setA": i.set_a, "setB": i.set_b} for i in db_items]
 
             detected_answers, raw_score, total_points, breakdown, detected_qr_id, warped_b64, detected_set = grade_sheet_opencv(
                 img_bytes, items, payload.testSet
             )
 
-            cls_obj = db.query(CourseClass).filter_by(class_id=payload.classId).first()
-            pass_pct = cls_obj.passing_percentage if cls_obj else 70
+            pass_pct = cls_obj.passing_percentage
             percentage = round((raw_score / total_points) * 100, 2) if total_points > 0 else 0.0
             is_passed = percentage >= pass_pct
 
@@ -484,16 +535,36 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                 "percentage": percentage,
                 "isPassed": is_passed,
                 "status": "PASSED" if is_passed else "FAILED",
+                "passingPercentage": pass_pct,
+                "reviewCount": sum(1 for item in breakdown if item.get("reviewRequired")),
+                "reviewRequired": any(item.get("reviewRequired") for item in breakdown),
+                "reviewEngine": "local-opencv-heuristic-v1",
                 "itemBreakdown": breakdown
             }
 
         elif act == "SCANNER_SUBMIT":
+            faculty = validate_token(db, payload.sessionToken)
+            if not faculty or faculty.role != "TEACHER":
+                return {"success": False, "message": "Faculty login required to record grades."}
+            cls_obj = db.query(CourseClass).filter_by(class_id=payload.classId).first()
+            if not cls_obj or cls_obj.owner_teacher_id != faculty.student_id:
+                return {"success": False, "message": "Exam class not available to this faculty account."}
+            if payload.testSet not in ("A", "B"):
+                return {"success": False, "message": "Invalid exam set."}
+            if not payload.itemBreakdown:
+                return {"success": False, "message": "A completed scan review is required."}
+            if any(i.get("reviewRequired") and not i.get("reviewed") for i in payload.itemBreakdown):
+                return {"success": False, "message": "Resolve all flagged answers before saving."}
             sid = (payload.studentId or "").strip()
+            if not sid:
+                return {"success": False, "message": "Identify the student before saving."}
             st = db.query(RosterUser).filter(RosterUser.student_id.ilike(sid)).first()
             full_name = st.full_name if st else f"Student ({sid})"
             section = st.section if st else "Scanned Sheet"
 
             db_items = db.query(ExamItem).filter_by(class_id=payload.classId).order_by(ExamItem.item_no.asc()).all()
+            if not db_items or len(payload.itemBreakdown) != len(db_items):
+                return {"success": False, "message": "Scan does not match the saved exam key. Retake the scan."}
             raw_score, total_points = 0, 0
             ans_map = payload.answers or {}
             t_set = (payload.testSet or "A").upper()
@@ -505,7 +576,8 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                 if it.type == "TF":
                     if s_ans == "A": s_ans = "T"
                     elif s_ans == "B": s_ans = "F"
-                if s_ans and (s_ans == correct_key or correct_key in ["*", "ALL"]):
+                allowed = ("T", "F") if it.type == "TF" else ("A", "B", "C", "D")
+                if s_ans in allowed and (s_ans == correct_key or correct_key in ["*", "ALL"]):
                     raw_score += it.points
 
             cls_obj = db.query(CourseClass).filter_by(class_id=payload.classId).first()
@@ -569,7 +641,14 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             return {"success": True, "message": "Grade override applied successfully."}
 
         elif act == "GET_SUBMISSIONS":
-            subs = db.query(Submission).filter_by(class_id=payload.classId).order_by(Submission.timestamp.desc()).all()
+            owner = db.query(CourseClass.owner_teacher_id).filter_by(class_id=payload.classId).scalar()
+            if owner is None or (user.student_id.upper() != "FACULTY-01" and owner != user.student_id):
+                return {"success": False, "message": "Class is not available to this faculty account."}
+            subs = db.query(
+                Submission.id, Submission.full_name, Submission.student_id,
+                Submission.test_set, Submission.raw_score, Submission.total_points,
+                Submission.percentage, Submission.is_passed, Submission.timestamp
+            ).filter_by(class_id=payload.classId).order_by(Submission.timestamp.desc()).all()
             return {
                 "success": True,
                 "submissions": [
@@ -584,9 +663,6 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
                         "percentage": f"{s.percentage}%",
                         "isPassed": s.is_passed,
                         "timestamp": s.timestamp.strftime("%Y-%m-%d %H:%M"),
-                        "scannedImage": s.scanned_image,
-                        "answers": s.answers,
-                        "itemBreakdown": s.item_breakdown
                     } for s in subs
                 ]
             }

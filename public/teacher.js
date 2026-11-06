@@ -274,14 +274,18 @@ async function onActiveClassChange(classId) {
   isRosterLoaded = false;
   isSubmissionsLoaded = false;
   isBuilderLoaded = false;
+  enrolledStudentsList = [];
+  allStudentsList = [];
+  builderItems = [];
+  currentSubmissions = [];
 
   const activeTab = document.querySelector('.nav-link.active').getAttribute('data-bs-target');
   if (activeTab === '#tab-enrollment') await loadSubjectEnrollment();
   if (activeTab === '#tab-submissions') await loadSubmissionsLedger();
   if (activeTab === '#tab-builder') await loadExamBuilder();
 
-  loadExamBuilderSilent();
-
+  // Do not fetch the answer key on every subject switch. The grading API
+  // uses the saved server-side key; load editor data only when that tab opens.
   if (typeof populateStudentSelect === 'function') {
     populateStudentSelect();
   }
@@ -376,8 +380,9 @@ async function loadSubjectEnrollment() {
   if (enrolledTbody) enrolledTbody.innerHTML = '<tr><td colspan="4" class="text-center py-5 text-body-secondary"><div class="spinner-border text-primary mb-3" style="width: 2rem; height: 2rem;"></div><br><span class="fw-semibold">Loading roster...</span></td></tr>';
   if (availableTbody) availableTbody.innerHTML = '<tr><td colspan="4" class="text-center py-5 text-body-secondary"><div class="spinner-border text-primary mb-3" style="width: 2rem; height: 2rem;"></div><br><span class="fw-semibold">Loading available students...</span></td></tr>';
 
-  const res = await callApi({ action: 'GET_CLASS_ENROLLMENTS', sessionToken, classId: activeClassId });
-  if (!res.success) return;
+  const requestedClassId = activeClassId;
+  const res = await callApi({ action: 'GET_CLASS_ENROLLMENTS', sessionToken, classId: requestedClassId });
+  if (requestedClassId !== activeClassId || !res.success) return;
 
   enrolledStudentsList = res.enrolledStudents || [];
   allStudentsList = res.availableStudents || [];
@@ -555,7 +560,9 @@ async function handleImportStudents(e) {
 
 async function loadExamBuilderSilent() {
   if (!activeClassId) return;
-  const res = await callApi({ action: 'GET_FULL_EXAM_CONFIG', sessionToken, classId: activeClassId });
+  const requestedClassId = activeClassId;
+  const res = await callApi({ action: 'GET_FULL_EXAM_CONFIG', sessionToken, classId: requestedClassId });
+  if (requestedClassId !== activeClassId) return;
   if (res.success && res.items) {
     builderItems = res.items;
   }
@@ -701,7 +708,9 @@ async function loadSubmissionsLedger() {
   const tbody = document.getElementById('submissions-table-body');
   tbody.innerHTML = '<tr><td colspan="8" class="text-center py-5 text-body-secondary"><div class="spinner-border text-primary mb-3" style="width: 2rem; height: 2rem;"></div><br><span class="fw-semibold">Retrieving records...</span></td></tr>';
 
-  const res = await callApi({ action: 'GET_SUBMISSIONS', sessionToken, classId: activeClassId });
+  const requestedClassId = activeClassId;
+  const res = await callApi({ action: 'GET_SUBMISSIONS', sessionToken, classId: requestedClassId });
+  if (requestedClassId !== activeClassId) return;
   tbody.innerHTML = '';
 
   if (!res.success || !res.submissions || res.submissions.length === 0) {
@@ -717,6 +726,7 @@ async function loadSubmissionsLedger() {
   isSubmissionsLoaded = true;
   let totalScore = 0, passedCount = 0, minScore = 9999, maxScore = -1;
 
+  const fragment = document.createDocumentFragment();
   currentSubmissions.forEach(s => {
     totalScore += s.rawScore;
     if (s.isPassed) passedCount++;
@@ -736,8 +746,9 @@ async function loadSubmissionsLedger() {
         <button class="btn btn-sm btn-outline-primary" onclick="openReviewModal(${s.id})"><i class="bi bi-eye"></i> View</button>
       </td>
     `;
-    tbody.appendChild(tr);
+    fragment.appendChild(tr);
   });
+  tbody.appendChild(fragment);
 
   document.getElementById('kpi-total').innerText = currentSubmissions.length;
   document.getElementById('kpi-mean').innerText = (totalScore / currentSubmissions.length).toFixed(2);
@@ -745,33 +756,57 @@ async function loadSubmissionsLedger() {
   document.getElementById('kpi-range').innerText = `${minScore === 9999 ? 0 : minScore} - ${maxScore === -1 ? 0 : maxScore}`;
 }
 
-function openReviewModal(subId) {
+async function openReviewModal(subId) {
   const sub = currentSubmissions.find(s => s.id === subId);
   if (!sub) return;
-  
+  const token = sessionToken;
+  const classId = activeClassId;
+
+  if (!sub._detailLoaded) {
+    if (!sub._detailPromise) {
+      sub._detailPromise = callApi({ action: 'GET_SUBMISSION_DETAIL',
+        sessionToken: token, submissionId: subId }).finally(() => { sub._detailPromise = null; });
+    }
+    const detail = await sub._detailPromise;
+    if (token !== sessionToken || classId !== activeClassId || !currentSubmissions.includes(sub)) return;
+    if (!detail.success) {
+      alert('Could not load the scanned sheet: ' + (detail.message || 'Unknown error'));
+      return;
+    }
+    sub.scannedImage = detail.scannedImage || '';
+    sub.itemBreakdown = detail.itemBreakdown || [];
+    sub.answers = detail.answers || {};
+    sub._detailLoaded = true;
+  }
+
   document.getElementById('review-sub-id').value = sub.id;
   document.getElementById('review-student-name').innerText = sub.fullName;
   document.getElementById('review-student-meta').innerText = `ID: ${sub.studentId} | Test Set: ${sub.testSet}`;
   document.getElementById('review-raw-score').value = sub.rawScore;
   document.getElementById('review-total-points').value = sub.totalPoints;
   document.getElementById('review-answers-json').value = JSON.stringify(sub.answers || {}, null, 2);
-  
+
   const activeClassObj = classList.find(cls => cls.classId === activeClassId);
   document.getElementById('review-class-pass-pct').value = activeClassObj ? activeClassObj.passingPercentage : 70;
 
   const canvas = document.getElementById('review-canvas');
   const ctx = canvas.getContext('2d');
-  
+
   if (sub.scannedImage) {
     const img = new Image();
     img.onload = () => {
+      if (token !== sessionToken || classId !== activeClassId) return;
       canvas.width = img.width;
       canvas.height = img.height;
       ctx.drawImage(img, 0, 0);
       if (sub.itemBreakdown && typeof drawValidationOverlays === 'function') {
+        ctx.save();
+        ctx.scale(img.width / 400, img.height / (sub.itemBreakdown.length > 50 ? 570 : 450));
         drawValidationOverlays(ctx, sub.itemBreakdown);
+        ctx.restore();
       }
     };
+    img.onerror = () => console.error('Could not decode saved sheet image.');
     img.src = "data:image/jpeg;base64," + sub.scannedImage;
   } else {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
