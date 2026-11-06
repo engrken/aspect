@@ -560,7 +560,9 @@ async function handleImportStudents(e) {
 
 async function loadExamBuilderSilent() {
   if (!activeClassId) return;
-  const res = await callApi({ action: 'GET_FULL_EXAM_CONFIG', sessionToken, classId: activeClassId });
+  const requestedClassId = activeClassId;
+  const res = await callApi({ action: 'GET_FULL_EXAM_CONFIG', sessionToken, classId: requestedClassId });
+  if (requestedClassId !== activeClassId) return;
   if (res.success && res.items) {
     builderItems = res.items;
   }
