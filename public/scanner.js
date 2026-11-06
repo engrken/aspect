@@ -180,6 +180,11 @@ function resetToLiveCamera() {
 
   const breakdownContainer = document.getElementById('ai-breakdown-container');
   if (breakdownContainer) breakdownContainer.innerHTML = '<span class="text-muted d-block text-center py-2">No scan data yet.</span>';
+  const reviewSummary = document.getElementById('scan-review-summary');
+  if (reviewSummary) {
+    reviewSummary.className = 'small mt-1 text-body-secondary';
+    reviewSummary.innerText = 'Free local OMR review detects uncertain markings before saving.';
+  }
 
   lastScannedData = null;
   cachedWarpedData = null;
