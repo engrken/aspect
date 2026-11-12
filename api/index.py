@@ -620,7 +620,7 @@ def handle_api(payload: ApiPayload, request: Request, response: Response,
             if payload.answers:
                 sub.answers = payload.answers
             db.commit()
-            logger.info("Grade override by faculty %s for submission %s", user.student_id, sub.id)
+            logger.warning("SECURITY_EVENT ASPECT_GRADE_OVERRIDE")
             return {"success": True, "message": "Grade override applied successfully."}
 
         elif act == "GET_SUBMISSIONS":
