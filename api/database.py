@@ -116,7 +116,14 @@ def ensure_seeded(db):
 def get_db():
     db = SessionLocal()
     try:
-        ensure_seeded(db)
+        if engine.dialect.name == 'sqlite':
+            ensure_seeded(db)
         yield db
     finally:
         db.close()
+
+
+if __name__ == "__main__":
+    # Schema changes run from an operator's administrative connection.
+    with SessionLocal() as session:
+        ensure_seeded(session)
