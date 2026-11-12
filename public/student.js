@@ -4,7 +4,14 @@
 const API_BASE_URL = window.ASPECT_CONFIG?.API_URL || '/api';
 
 let currentUser = null;
-let sessionToken = localStorage.getItem('aspect_token') || null;
+localStorage.removeItem('aspect_token');
+let sessionToken = null;
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, char => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[char]);
+}
+
 let authModal = null;
 let forcePasswordModal = null;
 let currentStudentResults = [];
@@ -12,10 +19,12 @@ let resultsRequestSequence = 0;
 
 async function callApi(payload) {
   try {
+    const { sessionToken: _legacy, ...body } = payload;
     const res = await fetch(API_BASE_URL, {
+      credentials: 'same-origin',
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(body)
     });
     return await res.json();
   } catch (err) {
@@ -129,36 +138,25 @@ window.addEventListener('DOMContentLoaded', () => {
   const modalEl = document.getElementById('auth-modal');
   if (modalEl) authModal = new bootstrap.Modal(modalEl);
 
-  if (sessionToken) {
-    callApi({ action: 'VALIDATE_SESSION', sessionToken: sessionToken })
-      .then(res => {
-        if (res.valid) {
-          if (res.user.role === 'TEACHER') {
-            window.location.href = 'teacher.html';
-            return;
-          }
-          currentUser = res.user;
-          if (checkPasswordForce()) {
-            hideGlobalLoader();
-            return;
-          }
-          initStudentDashboard();
-          hideGlobalLoader();
-        } else {
-          localStorage.removeItem('aspect_token');
-          sessionToken = null;
-          showGuestState();
-          hideGlobalLoader();
-        }
-      })
-      .catch(() => {
-        showGuestState();
-        hideGlobalLoader();
-      });
-  } else {
+
+  callApi({ action: 'VALIDATE_SESSION' }).then(res => {
+    if (!res.valid) {
+      showGuestState();
+      hideGlobalLoader();
+      return;
+    }
+    if (res.user.role === 'TEACHER') {
+      window.location.href = 'teacher.html';
+      return;
+    }
+    sessionToken = true;
+    currentUser = res.user;
+    if (!checkPasswordForce()) initStudentDashboard();
+    hideGlobalLoader();
+  }).catch(() => {
     showGuestState();
     hideGlobalLoader();
-  }
+  });
 });
 
 async function loginWithPassword(e) {
@@ -181,9 +179,8 @@ async function loginWithPassword(e) {
     btn.innerHTML = `<i class="bi bi-box-arrow-in-right me-1"></i> Sign In`;
 
     if (res.success) {
-      sessionToken = res.sessionToken;
+      sessionToken = true;
       currentUser = res.user;
-      localStorage.setItem('aspect_token', sessionToken);
       if (authModal) authModal.hide();
 
       if (currentUser.role === 'TEACHER') {
@@ -205,7 +202,7 @@ async function loginWithPassword(e) {
 async function submitForcedPassword(e) {
   e.preventDefault();
   const pwd = document.getElementById('force-new-pwd').value;
-  if (pwd.length < 6) return setForceAlert('Must be at least 6 characters.');
+  if (pwd.length < 12 || pwd.length > 128) return setForceAlert('Use 12 to 128 characters.');
   
   const btn = document.getElementById('btn-force-pwd');
   btn.disabled = true;
@@ -227,12 +224,9 @@ async function submitForcedPassword(e) {
 async function registerStudent(e) {
   if (e) e.preventDefault();
   const studentId = document.getElementById('reg-id').value.trim();
-  const fullName = document.getElementById('reg-name').value.trim();
-  const section = document.getElementById('reg-section').value.trim();
-  const email = document.getElementById('reg-email').value.trim();
   const password = document.getElementById('reg-password').value;
 
-  if (!studentId || !fullName || !section || !password) {
+  if (!studentId || !password) {
     return setAuthAlert('Please fill out all required fields.');
   }
 
@@ -245,27 +239,23 @@ async function registerStudent(e) {
     const res = await callApi({
       action: 'REGISTER_STUDENT',
       studentId,
-      fullName,
-      section,
-      email,
       password
     });
 
     btn.disabled = false;
-    btn.innerHTML = `<i class="bi bi-person-check-fill me-1"></i> Complete Registration`;
+    btn.innerHTML = `<i class="bi bi-person-check-fill me-1"></i> Activate account`;
 
     if (res.success) {
-      sessionToken = res.sessionToken;
+      sessionToken = true;
       currentUser = res.user;
-      localStorage.setItem('aspect_token', sessionToken);
       if (authModal) authModal.hide();
-      initStudentDashboard();
+      if (!checkPasswordForce()) initStudentDashboard();
     } else {
       setAuthAlert(res.message || 'Registration failed.');
     }
   } catch (err) {
     btn.disabled = false;
-    btn.innerHTML = `<i class="bi bi-person-check-fill me-1"></i> Complete Registration`;
+    btn.innerHTML = `<i class="bi bi-person-check-fill me-1"></i> Activate account`;
     setAuthAlert('Connection error while registering.');
   }
 }
@@ -311,8 +301,9 @@ async function updateProfile(e) {
   }
 }
 
-function logout() {
+async function logout() {
   if (confirm("Sign out of your account?")) {
+    await callApi({ action: 'LOGOUT' });
     localStorage.removeItem('aspect_token');
     sessionToken = null;
     currentUser = null;
@@ -361,17 +352,19 @@ async function loadAvailableClasses() {
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td class="ps-3 py-3">
-        <div class="fw-bold text-primary font-monospace">${c.subjectCode}</div>
-        <div class="small fw-semibold text-wrap" style="max-width: 250px;">${c.subjectTitle}</div>
+        <div class="fw-bold text-primary font-monospace">${escapeHtml(c.subjectCode)}</div>
+        <div class="small fw-semibold text-wrap" style="max-width: 250px;">${escapeHtml(c.subjectTitle)}</div>
       </td>
-      <td class="small text-muted"><i class="bi bi-person me-1"></i>${c.instructorName}</td>
+      <td class="small text-muted"><i class="bi bi-person me-1"></i>${escapeHtml(c.instructorName)}</td>
       <td class="text-center pe-3">
         ${c.isEnrolled 
-          ? `<button class="btn btn-sm btn-outline-secondary w-100" onclick="unenrollClass('${c.classId}')"><i class="bi bi-check2 me-1"></i>Enrolled</button>`
-          : `<button class="btn btn-sm btn-success fw-bold shadow-sm w-100" onclick="enrollClass('${c.classId}')"><i class="bi bi-plus-lg me-1"></i>Enroll</button>`
+          ? `<button class="btn btn-sm btn-outline-secondary w-100" data-unenroll-class><i class="bi bi-check2 me-1"></i>Enrolled</button>`
+          : `<button class="btn btn-sm btn-success fw-bold shadow-sm w-100" data-enroll-class><i class="bi bi-plus-lg me-1"></i>Enroll</button>`
         }
       </td>
     `;
+    tr.querySelector('[data-enroll-class]')?.addEventListener('click', () => enrollClass(c.classId));
+    tr.querySelector('[data-unenroll-class]')?.addEventListener('click', () => unenrollClass(c.classId));
     tbody.appendChild(tr);
   });
 }
@@ -410,7 +403,7 @@ async function loadStudentResults() {
       currentStudentResults = res.results;
       renderResults(currentStudentResults);
     } else {
-      container.innerHTML = `<div class="col-12 alert alert-danger">${res.message}</div>`;
+      container.innerHTML = `<div class="col-12 alert alert-danger">${escapeHtml(res.message)}</div>`;
     }
   } catch (err) {
     if (sequence === resultsRequestSequence && token === sessionToken) {
@@ -446,31 +439,31 @@ function renderResults(results) {
     card.innerHTML = `
       <div class="card h-100 shadow-sm border">
         <div class="card-header bg-body border-bottom py-2.5 d-flex justify-content-between align-items-center">
-          <span class="fw-bold font-monospace text-primary">${item.subjectCode}</span>
-          <span class="badge ${isPassed ? 'bg-success' : 'bg-danger'}">${item.status}</span>
+          <span class="fw-bold font-monospace text-primary">${escapeHtml(item.subjectCode)}</span>
+          <span class="badge ${isPassed ? 'bg-success' : 'bg-danger'}">${escapeHtml(item.status)}</span>
         </div>
         <div class="card-body pb-2">
-          <h6 class="fw-bold mb-1">${item.subjectTitle}</h6>
-          <small class="text-body-secondary d-block mb-3">Section: ${item.section} • Test Set: ${item.set}</small>
+          <h6 class="fw-bold mb-1">${escapeHtml(item.subjectTitle)}</h6>
+          <small class="text-body-secondary d-block mb-3">Section: ${escapeHtml(item.section)} • Test Set: ${escapeHtml(item.set)}</small>
 
           <div class="row g-2 text-center mb-3">
             <div class="col-6">
               <div class="border rounded p-2 bg-body-tertiary">
                 <span class="text-uppercase fw-bold text-body-secondary" style="font-size: 0.65rem;">Raw Score</span>
-                <div class="fs-4 fw-bold">${item.rawScore} <small class="fs-6 text-secondary">/ ${item.totalPoints}</small></div>
+                <div class="fs-4 fw-bold">${escapeHtml(item.rawScore)} <small class="fs-6 text-secondary">/ ${escapeHtml(item.totalPoints)}</small></div>
               </div>
             </div>
             <div class="col-6">
               <div class="border rounded p-2 bg-primary-subtle border-primary-subtle">
                 <span class="text-uppercase fw-bold text-primary" style="font-size: 0.65rem;">Score Rate</span>
-                <div class="fs-4 fw-bold text-primary-emphasis">${item.percentage}</div>
+                <div class="fs-4 fw-bold text-primary-emphasis">${escapeHtml(item.percentage)}</div>
               </div>
             </div>
           </div>
           
           <div class="d-flex justify-content-between align-items-center text-secondary small">
-            <span><i class="bi bi-clock-history me-1"></i>${item.timestamp}</span>
-            ${hasImage ? `<button class="btn btn-sm btn-outline-primary py-0" onclick="viewStudentSheet(${item.id})"><i class="bi bi-camera"></i> View Sheet</button>` : ''}
+            <span><i class="bi bi-clock-history me-1"></i>${escapeHtml(item.timestamp)}</span>
+            ${hasImage ? `<button class="btn btn-sm btn-outline-primary py-0" onclick="viewStudentSheet(${Number(item.id)})"><i class="bi bi-camera"></i> View Sheet</button>` : ''}
           </div>
         </div>
       </div>

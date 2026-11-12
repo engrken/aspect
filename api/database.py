@@ -112,36 +112,6 @@ def ensure_seeded(db):
             db.rollback()
             print(f"Migration skipped: {e}")
 
-    # Remove dummy students
-    try:
-        dummy_students = db.query(RosterUser).filter(RosterUser.full_name.like("Examinee Student %")).all()
-        if dummy_students:
-            for ds in dummy_students:
-                db.query(Enrollment).filter_by(student_id=ds.student_id).delete()
-                db.delete(ds)
-            db.commit()
-    except Exception:
-        db.rollback()
-
-    # Ensure FACULTY-01 exists
-    try:
-        faculty = db.query(RosterUser).filter_by(student_id="FACULTY-01").first()
-        if not faculty:
-            db.add(RosterUser(
-                student_id="FACULTY-01",
-                email="faculty@filamer.edu.ph",
-                full_name="System Administrator",
-                section="College of Engineering",
-                role="TEACHER",
-                password_hash=hash_password("admin123"),
-                must_change_password=False
-            ))
-            db.commit()
-        elif not faculty.password_hash:
-            faculty.password_hash = hash_password("admin123")
-            db.commit()
-    except Exception:
-        db.rollback()
 
 def get_db():
     db = SessionLocal()

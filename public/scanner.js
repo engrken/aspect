@@ -51,8 +51,10 @@ if ('BarcodeDetector' in window) {
 function populateStudentSelect() {
   const sel = document.getElementById('scan-student-select');
   if (!sel) return;
-  sel.innerHTML = '<option value="">Roster Selector...</option>' +
-    enrolledStudentsList.map(s => `<option value="${s.studentId}">${s.fullName} (${s.studentId})</option>`).join('');
+  sel.replaceChildren(new Option('Roster Selector...', ''));
+  for (const student of enrolledStudentsList) {
+    sel.add(new Option(`${student.fullName} (${student.studentId})`, student.studentId));
+  }
 }
 
 function onStudentSelectChange(val) {
