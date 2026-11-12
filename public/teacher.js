@@ -1,6 +1,13 @@
 const API_BASE_URL = window.ASPECT_CONFIG?.API_URL || '/api';
 
-let sessionToken = localStorage.getItem('aspect_token') || '';
+localStorage.removeItem('aspect_token');
+let sessionToken = null;
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, char => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[char]);
+}
+
 let classList = [];
 let activeClassId = localStorage.getItem('aspect_active_class') || '';
 let builderItems = [];
@@ -15,10 +22,12 @@ let isBuilderLoaded = false;
 
 async function callApi(payload) {
   try {
+    const { sessionToken: _legacy, ...body } = payload;
     const res = await fetch(API_BASE_URL, {
+      credentials: 'same-origin',
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(body)
     });
     return await res.json();
   } catch (err) {
@@ -39,18 +48,15 @@ function hideGlobalLoader() {
 
 window.addEventListener('DOMContentLoaded', async () => {
   initTheme();
-  if (!sessionToken) {
-    window.location.href = 'index.html';
-    return;
-  }
-
-  const auth = await callApi({ action: 'VALIDATE_SESSION', sessionToken });
+    const auth = await callApi({ action: 'VALIDATE_SESSION', sessionToken });
   if (!auth.valid || auth.user.role !== 'TEACHER') {
     localStorage.removeItem('aspect_token');
     window.location.href = 'index.html';
     return;
   }
 
+  sessionToken = true;
+  if (auth.user.studentId !== 'FACULTY-01') document.getElementById('tab-faculty-btn')?.setAttribute('hidden', '');
   document.getElementById('nav-name').innerText = auth.user.fullName;
   document.getElementById('nav-id').innerText = `Faculty ID: ${auth.user.studentId}`;
   document.getElementById('nav-avatar').innerText = auth.user.fullName.charAt(0);
@@ -71,7 +77,8 @@ window.addEventListener('DOMContentLoaded', async () => {
   await loadClasses();
 });
 
-function logoutTeacher() {
+async function logoutTeacher() {
+  await callApi({ action: 'LOGOUT' });
   localStorage.removeItem('aspect_token');
   localStorage.removeItem('aspect_active_class');
   window.location.href = 'index.html';
@@ -138,17 +145,19 @@ async function loadFacultyList() {
     const isPrimaryAdmin = f.facultyId === 'FACULTY-01';
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td class="font-monospace fw-bold">${f.facultyId} ${isPrimaryAdmin ? '<span class="badge bg-primary ms-1">ADMIN</span>' : ''}</td>
-      <td class="fw-semibold">${f.fullName}</td>
-      <td>${f.department || '—'}</td>
-      <td>${f.email || '—'}</td>
+      <td class="font-monospace fw-bold">${escapeHtml(f.facultyId)} ${isPrimaryAdmin ? '<span class="badge bg-primary ms-1">ADMIN</span>' : ''}</td>
+      <td class="fw-semibold">${escapeHtml(f.fullName)}</td>
+      <td>${escapeHtml(f.department || '—')}</td>
+      <td>${escapeHtml(f.email || '—')}</td>
       <td class="text-center">
-        <button class="btn btn-sm btn-outline-secondary me-1" onclick="openEditFacultyModal('${f.facultyId}', '${f.fullName.replace(/'/g, "\\'")}', '${(f.department || '').replace(/'/g, "\\'")}', '${f.email || ''}')" title="Reset Password / Edit">
+        <button class="btn btn-sm btn-outline-secondary me-1 edit-faculty" title="Reset Password / Edit">
           <i class="bi bi-pencil"></i>
         </button>
-        ${!isPrimaryAdmin ? `<button class="btn btn-sm btn-outline-danger" onclick="deleteFaculty('${f.facultyId}')" title="Remove"><i class="bi bi-trash"></i></button>` : ''}
+        ${!isPrimaryAdmin ? `<button class="btn btn-sm btn-outline-danger" data-delete-faculty title="Remove"><i class="bi bi-trash"></i></button>` : ''}
       </td>
     `;
+    tr.querySelector('.edit-faculty').addEventListener('click', () => openEditFacultyModal(f.facultyId, f.fullName, f.department || '', f.email || ''));
+    tr.querySelector('[data-delete-faculty]')?.addEventListener('click', () => deleteFaculty(f.facultyId));
     tbody.appendChild(tr);
   });
 }
@@ -241,24 +250,27 @@ async function loadClasses() {
   classList.forEach(c => {
     const opt = document.createElement('option');
     opt.value = c.classId;
-    opt.innerText = `${c.subjectCode} (${c.defaultSection || 'General'})`;
+    opt.innerText = `${escapeHtml(c.subjectCode)} (${c.defaultSection || 'General'})`;
     if (c.classId === activeClassId) opt.selected = true;
     select.appendChild(opt);
 
     if (tbody) {
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td class="font-monospace fw-bold">${c.subjectCode}</td>
-        <td>${c.subjectTitle}</td>
-        <td>${c.defaultSection || '—'}</td>
+        <td class="font-monospace fw-bold">${escapeHtml(c.subjectCode)}</td>
+        <td>${escapeHtml(c.subjectTitle)}</td>
+        <td>${escapeHtml(c.defaultSection || '—')}</td>
         <td><span class="badge bg-secondary-subtle text-secondary-emphasis">${c.passingPercentage || 70}%</span></td>
         <td><span class="badge bg-primary-subtle text-primary-emphasis">${c.totalItems || 50} Items</span></td>
         <td class="text-center">
-          <button class="btn btn-sm btn-outline-primary me-1" onclick="selectClassAndGo('${c.classId}', '#tab-scanner')"><i class="bi bi-camera"></i> Scan</button>
-          <button class="btn btn-sm btn-outline-secondary me-1" onclick="openEditClassModal('${c.classId}')"><i class="bi bi-pencil"></i></button>
-          <button class="btn btn-sm btn-outline-danger" onclick="deleteClass('${c.classId}')"><i class="bi bi-trash"></i></button>
+          <button class="btn btn-sm btn-outline-primary me-1" data-scan-class><i class="bi bi-camera"></i> Scan</button>
+          <button class="btn btn-sm btn-outline-secondary me-1" data-edit-class><i class="bi bi-pencil"></i></button>
+          <button class="btn btn-sm btn-outline-danger" data-delete-class><i class="bi bi-trash"></i></button>
         </td>
       `;
+      tr.querySelector('[data-scan-class]').addEventListener('click', () => selectClassAndGo(c.classId, '#tab-scanner'));
+      tr.querySelector('[data-edit-class]').addEventListener('click', () => openEditClassModal(c.classId));
+      tr.querySelector('[data-delete-class]').addEventListener('click', () => deleteClass(c.classId));
       tbody.appendChild(tr);
     }
   });
@@ -370,7 +382,7 @@ async function loadSubjectEnrollment() {
   if (!activeClassId) return;
   const c = classList.find(x => x.classId === activeClassId);
   if (c) {
-    document.getElementById('enroll-subject-heading').innerText = `${c.subjectCode} — ${c.subjectTitle}`;
+    document.getElementById('enroll-subject-heading').innerText = `${escapeHtml(c.subjectCode)} — ${escapeHtml(c.subjectTitle)}`;
     document.getElementById('enroll-subject-subheading').innerText = `Section: ${c.defaultSection || 'None'}`;
   }
 
@@ -399,13 +411,14 @@ async function loadSubjectEnrollment() {
       enrolledStudentsList.forEach(s => {
         const tr = document.createElement('tr');
         tr.innerHTML = `
-          <td class="font-monospace">${s.studentId}</td>
-          <td class="fw-bold">${s.fullName}</td>
-          <td>${s.section || '—'}</td>
+          <td class="font-monospace">${escapeHtml(s.studentId)}</td>
+          <td class="fw-bold">${escapeHtml(s.fullName)}</td>
+          <td>${escapeHtml(s.section || '—')}</td>
           <td class="text-center">
-            <button class="btn btn-sm btn-outline-danger" onclick="unassignStudent('${s.studentId}')"><i class="bi bi-x-lg"></i></button>
+            <button class="btn btn-sm btn-outline-danger" data-unassign-student><i class="bi bi-x-lg"></i></button>
           </td>
         `;
+        tr.querySelector('[data-unassign-student]').addEventListener('click', () => unassignStudent(s.studentId));
         enrolledTbody.appendChild(tr);
       });
     }
@@ -427,10 +440,10 @@ function renderAvailableList() {
   allStudentsList.forEach(s => {
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td><input type="checkbox" class="form-check-input available-chk" value="${s.studentId}"></td>
-      <td class="font-monospace">${s.studentId}</td>
-      <td class="fw-bold">${s.fullName}</td>
-      <td>${s.section || '—'}</td>
+      <td><input type="checkbox" class="form-check-input available-chk" value="${escapeHtml(s.studentId)}"></td>
+      <td class="font-monospace">${escapeHtml(s.studentId)}</td>
+      <td class="fw-bold">${escapeHtml(s.fullName)}</td>
+      <td>${escapeHtml(s.section || '—')}</td>
     `;
     tbody.appendChild(tr);
   });
@@ -545,13 +558,16 @@ async function handleImportStudents(e) {
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Importing...';
 
-  const res = await callApi({ action: 'BATCH_IMPORT_STUDENTS', sessionToken, studentsList });
+  const res = await callApi({ action: 'BATCH_IMPORT_STUDENTS', sessionToken, classId: activeClassId, studentsList });
   btn.disabled = false;
   btn.innerHTML = 'Import Students';
 
   if(res.success) {
     bootstrap.Modal.getInstance(document.getElementById('import-students-modal')).hide();
-    alert(res.message);
+    const invitations = (res.invitations || []).map(item => item.studentId + ': ' + item.code);
+    const summary = invitations.length ? res.message + '\n\nCopy these single-use codes and give each student their own code.\n' + invitations.join('\n') : res.message;
+    if (invitations.length) window.prompt('Copy and securely distribute the individual invitation codes.', summary);
+    else alert(summary);
     await loadSubjectEnrollment();
   } else {
     alert("Error: " + res.message);
@@ -576,7 +592,7 @@ async function loadExamBuilder() {
   await loadExamBuilderSilent();
   const c = classList.find(x => x.classId === activeClassId);
   if (c) {
-    document.getElementById('builder-class-heading').innerText = `${c.subjectCode}: Answer Key`;
+    document.getElementById('builder-class-heading').innerText = `${escapeHtml(c.subjectCode)}: Answer Key`;
     document.getElementById('builder-class-subheading').innerText = `Configuring ${builderItems.length} Examination Items`;
   }
   isBuilderLoaded = true;
@@ -735,15 +751,15 @@ async function loadSubmissionsLedger() {
 
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td class="fw-bold">${s.fullName}</td>
-      <td class="font-monospace">${s.studentId}</td>
-      <td><span class="badge bg-secondary">${s.testSet || 'A'}</span></td>
+      <td class="fw-bold">${escapeHtml(s.fullName)}</td>
+      <td class="font-monospace">${escapeHtml(s.studentId)}</td>
+      <td><span class="badge bg-secondary">${escapeHtml(s.testSet || 'A')}</span></td>
       <td class="fw-bold font-monospace">${s.rawScore} / ${s.totalPoints}</td>
-      <td class="fw-bold">${s.percentage}</td>
+      <td class="fw-bold">${escapeHtml(s.percentage)}</td>
       <td><span class="badge ${s.isPassed ? 'bg-success' : 'bg-danger'}">${s.isPassed ? 'PASSED' : 'FAILED'}</span></td>
-      <td class="small text-body-secondary">${s.timestamp}</td>
+      <td class="small text-body-secondary">${escapeHtml(s.timestamp)}</td>
       <td class="text-center">
-        <button class="btn btn-sm btn-outline-primary" onclick="openReviewModal(${s.id})"><i class="bi bi-eye"></i> View</button>
+        <button class="btn btn-sm btn-outline-primary" onclick="openReviewModal(${Number(s.id)})"><i class="bi bi-eye"></i> View</button>
       </td>
     `;
     fragment.appendChild(tr);

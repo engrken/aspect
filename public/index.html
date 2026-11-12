@@ -62,14 +62,14 @@
       </div>
       <h3 class="fw-bold mb-2">Institutional Examination Gateway</h3>
       <p class="text-body-secondary mx-auto mb-4" style="max-width: 520px;">
-        Sign in with your ID and password, or register a new Student Account using your institutional Student ID.
+        Sign in with your ID and password, or activate your student account using the invitation code from your instructor.
       </p>
       <div class="d-flex flex-wrap justify-content-center gap-2">
         <button class="btn btn-primary fw-bold px-4 py-2 btn-touch" onclick="openAuthModal('login')">
           <i class="bi bi-box-arrow-in-right me-1"></i> Sign In
         </button>
         <button class="btn btn-outline-primary fw-bold px-4 py-2 btn-touch" onclick="openAuthModal('register')">
-          <i class="bi bi-person-plus-fill me-1"></i> Student Registration
+          <i class="bi bi-person-plus-fill me-1"></i> Activate student account
         </button>
       </div>
     </div>
@@ -207,7 +207,7 @@
                 <button class="nav-link active py-1 small fw-bold" id="tab-btn-login" type="button" onclick="switchAuthMode('login')">Sign In</button>
               </li>
               <li class="nav-item">
-                <button class="nav-link py-1 small fw-bold" id="tab-btn-register" type="button" onclick="switchAuthMode('register')">Register Student</button>
+                <button class="nav-link py-1 small fw-bold" id="tab-btn-register" type="button" onclick="switchAuthMode('register')">Activate student account</button>
               </li>
             </ul>
             <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
@@ -235,37 +235,23 @@
             </button>
           </form>
 
-          <!-- STUDENT SELF-REGISTRATION FORM -->
+          <!-- STUDENT INVITATION FORM -->
           <form id="form-register" class="d-none" onsubmit="registerStudent(event)">
             <div class="mb-2">
               <label class="form-label small fw-bold text-body-secondary mb-1">Student ID Number</label>
               <input type="text" id="reg-id" placeholder="e.g. 2026-0001" class="form-control font-monospace py-1.5 fw-semibold" required>
             </div>
-            <div class="mb-2">
-              <label class="form-label small fw-bold text-body-secondary mb-1">Full Name (Last, First M.I.)</label>
-              <input type="text" id="reg-name" placeholder="e.g. Dela Cruz, Juan A." class="form-control py-1.5" required>
-            </div>
-            <div class="row g-2 mb-2">
-              <div class="col-6">
-                <label class="form-label small fw-bold text-body-secondary mb-1">Course & Section</label>
-                <input type="text" id="reg-section" placeholder="e.g. BS-ECE 3A" class="form-control py-1.5" required>
-              </div>
-              <div class="col-6">
-                <label class="form-label small fw-bold text-body-secondary mb-1">Email (Optional)</label>
-                <input type="email" id="reg-email" placeholder="student@edu.ph" class="form-control py-1.5">
-              </div>
-            </div>
             <div class="mb-3">
-              <label class="form-label small fw-bold text-body-secondary mb-1">Create Password (min. 6 chars)</label>
+              <label class="form-label small fw-bold text-body-secondary mb-1">Invitation code from your instructor</label>
               <div class="input-group">
-                <input type="password" id="reg-password" placeholder="••••••••" minlength="6" class="form-control font-monospace py-1.5 fw-semibold" required>
+                <input type="password" id="reg-password" autocomplete="one-time-code" maxlength="128" class="form-control font-monospace py-1.5 fw-semibold" required>
                 <button class="btn btn-outline-secondary" type="button" onclick="togglePasswordVisibility('reg-password', 'reg-eye-icon')" tabindex="-1">
                   <i class="bi bi-eye" id="reg-eye-icon"></i>
                 </button>
               </div>
             </div>
             <button type="submit" id="btn-register" class="btn btn-success w-100 fw-bold py-2 btn-touch">
-              <i class="bi bi-person-check-fill me-1"></i> Complete Registration
+              <i class="bi bi-person-check-fill me-1"></i> Activate account
             </button>
           </form>
 

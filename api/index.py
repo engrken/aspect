@@ -1,8 +1,12 @@
 import base64
+import hashlib
+import logging
+import re
+import secrets
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, Request, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -21,10 +25,16 @@ except ImportError:
     from omr_engine import grade_sheet_opencv
 
 app = FastAPI()
+logger = logging.getLogger(__name__)
+SESSION_COOKIE = "__Host-aspect_session"
+ADMIN_ID = "FACULTY-01"
+LEGACY_PASSWORD_DIGESTS = {
+    "240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9",
+    "703b0a3d6ad75b649a28adde7d83c6251da457549263bc7ff45ec709b0a8448b",
+}
 
 class ApiPayload(BaseModel):
     action: str
-    sessionToken: Optional[str] = None
     studentId: Optional[str] = None
     password: Optional[str] = None
     newPassword: Optional[str] = None
@@ -51,10 +61,33 @@ class ApiPayload(BaseModel):
 def validate_token(db: Session, token: Optional[str]):
     if not token:
         return None
-    sess = db.query(AuthSession).filter_by(token=token).first()
+    sess = db.query(AuthSession).filter_by(token=hash_session(token)).first()
     if not sess or sess.expires_at < datetime.utcnow():
         return None
     return db.query(RosterUser).filter_by(student_id=sess.student_id).first()
+
+def hash_session(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+def issue_session(db: Session, response: Response, student_id: str):
+    token = secrets.token_urlsafe(32)
+    db.add(AuthSession(
+        token=hash_session(token),
+        student_id=student_id,
+        expires_at=datetime.utcnow() + timedelta(hours=12)
+    ))
+    response.set_cookie(SESSION_COOKIE, token, max_age=43200, path="/",
+                        secure=True, httponly=True, samesite="strict")
+
+def can_access_class(db: Session, user: RosterUser, class_id: Optional[str]) -> bool:
+    owner = db.query(CourseClass.owner_teacher_id).filter_by(class_id=class_id).scalar()
+    return owner is not None and (owner == user.student_id or user.student_id == ADMIN_ID)
+
+def is_legacy_password(password: str) -> bool:
+    return hashlib.sha256(password.casefold().encode()).hexdigest() in LEGACY_PASSWORD_DIGESTS
+
+def valid_password(password: str) -> bool:
+    return 12 <= len(password) <= 128 and not is_legacy_password(password)
 
 @app.get("/")
 @app.get("/api")
@@ -65,121 +98,58 @@ def api_health(full_path: str = ""):
 @app.post("/")
 @app.post("/api")
 @app.post("/api/{full_path:path}")
-def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(get_db)):
+def handle_api(payload: ApiPayload, request: Request, response: Response,
+               full_path: str = "", db: Session = Depends(get_db)):
+    response.headers["Cache-Control"] = "no-store"
+    token = request.cookies.get(SESSION_COOKIE)
     try:
         act = payload.action
+        user = validate_token(db, token)
+        if user and user.must_change_password and act not in {
+            "LOGIN", "REGISTER_STUDENT", "VALIDATE_SESSION", "CHANGE_PASSWORD", "LOGOUT"
+        }:
+            return {"success": False, "message": "Change your temporary password to continue."}
 
-        if act == "LOGIN":
+
+        if act in {"LOGIN", "REGISTER_STUDENT"}:
             sid = (payload.studentId or "").strip().upper()
-            pwd = (payload.password or "").strip()
-            if not sid or not pwd:
-                return {"success": False, "message": "ID and Password are required."}
-            user = db.query(RosterUser).filter(RosterUser.student_id.ilike(sid)).first()
-            if not user:
-                if sid == "FACULTY-01":
-                    user = RosterUser(
-                        student_id="FACULTY-01",
-                        email="faculty@filamer.edu.ph",
-                        full_name="System Administrator",
-                        section="College of Engineering",
-                        role="TEACHER",
-                        password_hash=hash_password("admin123"),
-                        must_change_password=False
-                    )
-                    db.add(user)
-                    db.commit()
-                else:
-                    return {"success": False, "message": f'ID "{sid}" is not registered.'}
+            password = payload.password or ""
+            if not sid or not password or len(password) > 128 or is_legacy_password(password):
+                return {"success": False, "message": "Invalid ID or password. Ask your instructor for help."}
+            account = db.query(RosterUser).filter_by(student_id=sid).with_for_update().first()
+            if not account or not account.password_hash or not verify_password(password, account.password_hash):
+                return {"success": False, "message": "Invalid ID or password. Ask your instructor for help."}
+            if act == "REGISTER_STUDENT" and (account.role != "STUDENT" or not account.must_change_password):
+                return {"success": False, "message": "A teacher-issued student invitation is required."}
+            if account.must_change_password:
+                # Consume the invitation atomically. The restricted cookie can only set a new password.
+                account.password_hash = ""
+                db.query(AuthSession).filter_by(student_id=account.student_id).delete()
+            elif token:
+                db.query(AuthSession).filter_by(token=hash_session(token)).delete()
+            issue_session(db, response, account.student_id)
+            db.commit()
+            return {
+                "success": True,
+                "user": {
+                    "studentId": account.student_id,
+                    "email": account.email,
+                    "fullName": account.full_name,
+                    "section": account.section,
+                    "role": account.role,
+                    "mustChangePassword": bool(account.must_change_password)
+                }
+            }
 
-            if not user.password_hash or "$" not in str(user.password_hash):
-                default_pw = "admin123" if user.role == "TEACHER" else pwd
-                user.password_hash = hash_password(default_pw)
+        elif act == "LOGOUT":
+            if token:
+                db.query(AuthSession).filter_by(token=hash_session(token)).delete()
                 db.commit()
-
-            if not verify_password(pwd, user.password_hash):
-                if sid == "FACULTY-01" and pwd == "admin123":
-                    user.password_hash = hash_password("admin123")
-                    user.role = "TEACHER"
-                    db.commit()
-                else:
-                    return {"success": False, "message": "Invalid password. Please try again."}
-
-            session_token = str(uuid.uuid4())
-            db.add(AuthSession(
-                token=session_token,
-                student_id=user.student_id,
-                otp_code=None,
-                expires_at=datetime.utcnow() + timedelta(hours=12)
-            ))
-            db.commit()
-            return {
-                "success": True,
-                "sessionToken": session_token,
-                "user": {
-                    "studentId": user.student_id,
-                    "email": user.email,
-                    "fullName": user.full_name,
-                    "section": user.section,
-                    "role": user.role,
-                    "mustChangePassword": bool(user.must_change_password)
-                }
-            }
-
-        elif act == "REGISTER_STUDENT":
-            sid = (payload.studentId or "").strip().upper()
-            name = (payload.fullName or "").strip()
-            sec = (payload.section or "").strip().upper()
-            email = (payload.email or "").strip().lower()
-            pwd = (payload.password or "").strip()
-
-            if not sid or not name or not sec or not pwd:
-                return {"success": False, "message": "Student ID, Full Name, Section, and Password are required."}
-            if len(pwd) < 6:
-                return {"success": False, "message": "Password must be at least 6 characters long."}
-
-            existing = db.query(RosterUser).filter(RosterUser.student_id.ilike(sid)).first()
-            if existing:
-                return {"success": False, "message": f'ID "{sid}" is already registered. Please sign in instead.'}
-
-            new_student = RosterUser(
-                student_id=sid,
-                email=email,
-                full_name=name,
-                section=sec,
-                role="STUDENT",
-                password_hash=hash_password(pwd),
-                must_change_password=False
-            )
-            db.add(new_student)
-
-            matching_classes = db.query(CourseClass).all()
-            for c in matching_classes:
-                if (c.default_section or "").strip().upper() == sec:
-                    db.add(Enrollment(class_id=c.class_id, student_id=sid))
-
-            session_token = str(uuid.uuid4())
-            db.add(AuthSession(
-                token=session_token,
-                student_id=sid,
-                otp_code=None,
-                expires_at=datetime.utcnow() + timedelta(hours=12)
-            ))
-            db.commit()
-            return {
-                "success": True,
-                "sessionToken": session_token,
-                "user": {
-                    "studentId": new_student.student_id,
-                    "email": new_student.email,
-                    "fullName": new_student.full_name,
-                    "section": new_student.section,
-                    "role": new_student.role,
-                    "mustChangePassword": False
-                }
-            }
+            response.delete_cookie(SESSION_COOKIE, path="/", secure=True, httponly=True, samesite="strict")
+            return {"success": True}
 
         elif act == "UPDATE_STUDENT_PROFILE":
-            user = validate_token(db, payload.sessionToken)
+            user = validate_token(db, token)
             if not user or user.role != "STUDENT":
                 return {"success": False, "message": "Unauthorized session."}
 
@@ -190,25 +160,28 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             if name: user.full_name = name
             if email is not None: user.email = email
             if pwd:
-                if len(pwd) < 6:
-                    return {"success": False, "message": "Password must be at least 6 characters."}
+                if not valid_password(pwd):
+                    return {"success": False, "message": "Use a unique password of 12 to 128 characters."}
                 user.password_hash = hash_password(pwd)
+                db.query(AuthSession).filter(AuthSession.student_id == user.student_id, AuthSession.token != hash_session(token)).delete()
             db.commit()
             return {"success": True, "message": "Profile updated."}
 
         elif act == "CHANGE_PASSWORD":
-            user = validate_token(db, payload.sessionToken)
+            user = validate_token(db, token)
             if not user:
                 return {"success": False, "message": "Unauthorized session."}
             new_pw = (payload.newPassword or "").strip()
-            if len(new_pw) < 6: return {"success": False, "message": "Password must be at least 6 characters long."}
+            if not valid_password(new_pw):
+                return {"success": False, "message": "Use a unique password of 12 to 128 characters."}
             user.password_hash = hash_password(new_pw)
             user.must_change_password = False
+            db.query(AuthSession).filter(AuthSession.student_id == user.student_id, AuthSession.token != hash_session(token)).delete()
             db.commit()
             return {"success": True, "message": "Password updated successfully."}
 
         elif act == "VALIDATE_SESSION":
-            user = validate_token(db, payload.sessionToken)
+            user = validate_token(db, token)
             if not user:
                 return {"valid": False}
             return {
@@ -224,7 +197,7 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             }
 
         elif act == "GET_STUDENT_RESULTS":
-            user = validate_token(db, payload.sessionToken)
+            user = validate_token(db, token)
             if not user:
                 return {"success": False, "message": "Invalid session."}
             # The list must never fetch base64 scan images or per-bubble JSON.
@@ -269,7 +242,7 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             }
 
         elif act == "GET_SUBMISSION_DETAIL":
-            user = validate_token(db, payload.sessionToken)
+            user = validate_token(db, token)
             if not user or not payload.submissionId:
                 return {"success": False, "message": "Login and submission ID required."}
             sub = db.query(Submission).filter_by(id=payload.submissionId).first()
@@ -295,7 +268,7 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             }
 
         elif act == "GET_AVAILABLE_CLASSES":
-            user = validate_token(db, payload.sessionToken)
+            user = validate_token(db, token)
             if not user or user.role != "STUDENT":
                 return {"success": False, "message": "Unauthorized session."}
             all_classes = db.query(CourseClass).all()
@@ -314,7 +287,7 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             return {"success": True, "classes": res_classes}
 
         elif act == "ENROLL_IN_CLASS":
-            user = validate_token(db, payload.sessionToken)
+            user = validate_token(db, token)
             if not user or user.role != "STUDENT":
                 return {"success": False, "message": "Unauthorized session."}
             if not payload.classId:
@@ -326,7 +299,7 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             return {"success": True, "message": "Successfully enrolled."}
 
         elif act == "UNENROLL_CLASS":
-            user = validate_token(db, payload.sessionToken)
+            user = validate_token(db, token)
             if not user or user.role != "STUDENT":
                 return {"success": False, "message": "Unauthorized session."}
             db.query(Enrollment).filter_by(class_id=payload.classId, student_id=user.student_id).delete()
@@ -334,9 +307,19 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             return {"success": True, "message": "Successfully unenrolled."}
 
         # --- TEACHER / SYSTEM ADMIN ENDPOINTS BELOW ---
-        user = validate_token(db, payload.sessionToken)
+        user = validate_token(db, token)
         if not user or user.role != "TEACHER":
             return {"success": False, "message": "Unauthorized teacher session."}
+
+        if act in {"GET_FACULTY", "REGISTER_FACULTY", "DELETE_FACULTY"} and user.student_id != ADMIN_ID:
+            return {"success": False, "message": "Administrator access is required."}
+
+        if act in {
+            "GET_FULL_EXAM_CONFIG", "SAVE_EXAM_CONFIG", "GET_CLASS_ENROLLMENTS",
+            "ASSIGN_STUDENTS", "ASSIGN_STUDENTS_TO_CLASS", "AUTO_ASSIGN_SECTION",
+            "UNASSIGN_STUDENT", "BATCH_IMPORT_STUDENTS"
+        } and not can_access_class(db, user, payload.classId):
+            return {"success": False, "message": "Class is not available to this faculty account."}
 
         if act == "GET_CLASSES":
             if user.student_id.upper() == "FACULTY-01":
@@ -367,6 +350,8 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             cid = cd.get("classId") or f"CLS-{uuid.uuid4().hex[:5].upper()}"
             existing = db.query(CourseClass).filter_by(class_id=cid).first()
             if existing:
+                if not can_access_class(db, user, cid):
+                    return {"success": False, "message": "Class is not available to this faculty account."}
                 existing.subject_code = cd.get("subjectCode", existing.subject_code)
                 existing.subject_title = cd.get("subjectTitle", existing.subject_title)
                 existing.default_section = cd.get("defaultSection") or cd.get("section") or existing.default_section
@@ -457,50 +442,44 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             db.commit()
             return {"success": True}
 
+
         elif act == "BATCH_IMPORT_STUDENTS":
-            st_list = payload.studentsList or []
-            if not st_list:
-                return {"success": False, "message": "No valid records provided."}
-            added, updated = 0, 0
-            default_pw = "student123"
-            default_hash = hash_password(default_pw)
-            classes = db.query(CourseClass).all()
-
-            for s in st_list:
-                sid = str(s.get("studentId", "")).strip().upper()
-                name = str(s.get("fullName", "")).strip()
-                sec = str(s.get("section", "BS-ECE")).strip().upper()
-                email = str(s.get("email", "")).strip().lower()
-
-                if not sid or not name: continue
-
-                existing = db.query(RosterUser).filter(RosterUser.student_id.ilike(sid)).first()
-                if existing:
-                    existing.full_name = name
-                    existing.section = sec
-                    if email: existing.email = email
-                    if not existing.password_hash:
-                        existing.password_hash = default_hash
-                        existing.must_change_password = True
-                    updated += 1
-                else:
-                    new_user = RosterUser(
-                        student_id=sid, email=email, full_name=name, section=sec,
-                        role="STUDENT", password_hash=default_hash, must_change_password=True
-                    )
-                    db.add(new_user)
-                    added += 1
-
-                for c in classes:
-                    if (c.default_section or "").strip().upper() == sec:
-                        enr = db.query(Enrollment).filter_by(class_id=c.class_id, student_id=sid).first()
-                        if not enr:
-                            db.add(Enrollment(class_id=c.class_id, student_id=sid))
+            roster = payload.studentsList or []
+            if not 1 <= len(roster) <= 500:
+                return {"success": False, "message": "Import between 1 and 500 roster records."}
+            enrolled = {
+                row.student_id for row in db.query(Enrollment).filter_by(class_id=payload.classId).all()
+            }
+            processed = set()
+            invitations = []
+            for row in roster:
+                sid = str(row.get("studentId", "")).strip().upper()
+                name = str(row.get("fullName", "")).strip()[:160]
+                if sid in processed or not re.fullmatch(r"[A-Z0-9][A-Z0-9-]{2,39}", sid) or not name:
+                    continue
+                processed.add(sid)
+                account = db.query(RosterUser).filter_by(student_id=sid).first()
+                if account and account.role != "STUDENT":
+                    continue
+                if not account:
+                    account = RosterUser(student_id=sid, full_name=name,
+                                         section=str(row.get("section", "")).strip()[:80],
+                                         email=str(row.get("email", "")).strip().lower()[:200],
+                                         role="STUDENT", must_change_password=True)
+                    db.add(account)
+                if account.must_change_password and (account in db.new or sid in enrolled):
+                    invite = secrets.token_urlsafe(18)
+                    account.password_hash = hash_password(invite)
+                    db.query(AuthSession).filter_by(student_id=sid).delete()
+                    invitations.append({"studentId": sid, "code": invite})
+                if sid not in enrolled:
+                    db.add(Enrollment(class_id=payload.classId, student_id=sid))
+                    enrolled.add(sid)
             db.commit()
-            return {"success": True, "message": f"Import complete: {added} new students added, {updated} updated. Default password is 'student123'."}
+            return {"success": True, "message": "Roster import completed.", "invitations": invitations}
 
         elif act == "AI_VISION_GRADE":
-            faculty = validate_token(db, payload.sessionToken)
+            faculty = validate_token(db, token)
             if not faculty or faculty.role != "TEACHER":
                 return {"success": False, "message": "Faculty login required to scan examinations."}
             cls_obj = db.query(CourseClass).filter_by(class_id=payload.classId).first()
@@ -543,7 +522,7 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             }
 
         elif act == "SCANNER_SUBMIT":
-            faculty = validate_token(db, payload.sessionToken)
+            faculty = validate_token(db, token)
             if not faculty or faculty.role != "TEACHER":
                 return {"success": False, "message": "Faculty login required to record grades."}
             cls_obj = db.query(CourseClass).filter_by(class_id=payload.classId).first()
@@ -630,14 +609,18 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
 
         elif act == "UPDATE_SUBMISSION":
             sub = db.query(Submission).filter_by(id=payload.submissionId).first()
-            if not sub:
+            if not sub or not can_access_class(db, user, sub.class_id):
                 return {"success": False, "message": "Submission record not found."}
+            if payload.rawScore is None or not 0 <= payload.rawScore <= sub.total_points:
+                return {"success": False, "message": "Score must be between zero and the total available points."}
+            cls = db.query(CourseClass).filter_by(class_id=sub.class_id).one()
             sub.raw_score = payload.rawScore
-            sub.percentage = payload.percentage
-            sub.is_passed = payload.isPassed
+            sub.percentage = round(100 * sub.raw_score / sub.total_points, 2) if sub.total_points else 0.0
+            sub.is_passed = sub.percentage >= cls.passing_percentage
             if payload.answers:
                 sub.answers = payload.answers
             db.commit()
+            logger.info("Grade override by faculty %s for submission %s", user.student_id, sub.id)
             return {"success": True, "message": "Grade override applied successfully."}
 
         elif act == "GET_SUBMISSIONS":
@@ -677,10 +660,17 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
             femail = (fd.get("email") or "").strip().lower()
             fdept = (fd.get("department") or "College of Engineering").strip()
             fpwd = (fd.get("password") or "").strip()
-            if not fid or not fname or not fpwd: return {"success": False, "message": "Missing required fields."}
-            existing = db.query(RosterUser).filter(RosterUser.student_id.ilike(fid)).first()
+            if not re.fullmatch(r"[A-Z0-9][A-Z0-9-]{2,39}", fid) or not fname or not valid_password(fpwd):
+                return {"success": False, "message": "Provide a valid faculty ID and a unique password of 12 to 128 characters."}
+            existing = db.query(RosterUser).filter_by(student_id=fid).first()
+            if existing and existing.role != "TEACHER":
+                return {"success": False, "message": "This ID is already in use by a student."}
             if existing:
-                existing.full_name = fname; existing.email = femail; existing.section = fdept; existing.role = "TEACHER"; existing.password_hash = hash_password(fpwd)
+                existing.full_name = fname
+                existing.email = femail
+                existing.section = fdept
+                existing.password_hash = hash_password(fpwd)
+                db.query(AuthSession).filter_by(student_id=fid).delete()
                 db.commit()
                 return {"success": True, "message": "Faculty account updated."}
             db.add(RosterUser(student_id=fid, email=femail, full_name=fname, section=fdept, role="TEACHER", password_hash=hash_password(fpwd)))
@@ -689,10 +679,13 @@ def handle_api(payload: ApiPayload, full_path: str = "", db: Session = Depends(g
         elif act == "DELETE_FACULTY":
             target_id = (payload.facultyId or "").strip().upper()
             if target_id in ["FACULTY-01", user.student_id.upper()]: return {"success": False, "message": "Cannot delete admin or self."}
-            db.query(RosterUser).filter(RosterUser.student_id.ilike(target_id)).delete()
+            db.query(AuthSession).filter_by(student_id=target_id).delete()
+            db.query(RosterUser).filter_by(student_id=target_id, role="TEACHER").delete()
             db.commit()
             return {"success": True}
 
         return {"success": False, "message": f"Action '{act}' not supported."}
-    except Exception as e:
-        return {"success": False, "message": f"Backend error: {str(e)}"}
+    except Exception:
+        db.rollback()
+        logger.warning("ASPECT request failed for action %s", payload.action)
+        return {"success": False, "message": "Unable to complete the request."}

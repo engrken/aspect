@@ -20,7 +20,8 @@ function fakeDocument() {
   };
   return { node, doc: {
     getElementById: node, createElement: () => ({
-      style: {}, innerHTML: '', children: [], appendChild(v) { this.children.push(v); }
+      style: {}, innerHTML: '', children: [], appendChild(v) { this.children.push(v); },
+      querySelector: () => ({ addEventListener() {} })
     }),
     createDocumentFragment: () => ({
       children: [], appendChild(v) { this.children.push(v); }
@@ -35,7 +36,8 @@ function buildApp(file, responses, role) {
   const fetch = async (_url, options) => {
     const request = JSON.parse(options.body);
     calls.push(request.action);
-    assert(request.sessionToken, 'Dashboard requests must carry the session token.');
+    assert.equal(request.sessionToken, undefined, 'Session credentials must stay outside the request body.');
+    assert.equal(options.credentials, 'same-origin');
     assert(responses[request.action], 'Unexpected API action: ' + request.action);
     return { json: async () => responses[request.action] };
   };
@@ -91,7 +93,7 @@ async function checkTeacher() {
       defaultSection: '3A', totalItems: 50, passingPercentage: 70
     }] },
     GET_SUBMISSIONS: { success: true, submissions: [{
-      id: 44, fullName: 'Example Student', studentId: 'S1', testSet: 'A',
+      id: 44, fullName: '<img src=x onerror=alert(1)>', studentId: 'S1', testSet: 'A',
       rawScore: 40, totalPoints: 50, percentage: '80%',
       isPassed: true, timestamp: '2026-11-06'
     }] },
@@ -102,6 +104,10 @@ async function checkTeacher() {
   assert.deepEqual(app.calls, ['GET_CLASSES'],
     'Opening the teacher dashboard must not eagerly fetch the exam builder.');
   await app.run('loadSubmissionsLedger()');
+  const table = app.node('submissions-table-body');
+  const row = table.children.at(-1).children[0].innerHTML;
+  assert.match(row, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(row, /<img src=x/);
   await app.run('openReviewModal(44)');
   await app.run('openReviewModal(44)');
   assert.deepEqual(app.calls, ['GET_CLASSES', 'GET_SUBMISSIONS', 'GET_SUBMISSION_DETAIL'],
