@@ -10,7 +10,9 @@ from api.index import email_delivery_configured, generate_otp, otp_digest
 class OTPAuthHelperTests(unittest.TestCase):
     def test_generated_code_is_six_digits(self):
         for _ in range(100):
-            self.assertRegex(generate_otp(), r"^\\d{6}$")
+            code = generate_otp()
+            self.assertEqual(len(code), 6)
+            self.assertTrue(code.isascii() and code.isdigit())
 
     def test_digest_is_stable_and_account_bound(self):
         digest = otp_digest("student-001", "123456")
