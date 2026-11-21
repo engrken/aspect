@@ -179,7 +179,7 @@ async function requestLoginOtp() {
 async function verifyLoginOtp() {
   const id = document.getElementById('auth-id').value.trim();
   const otp = document.getElementById('auth-otp').value.trim();
-  if (!/^\\d{6}$/.test(otp)) return setAuthAlert('Enter the six-digit verification code.');
+  if (!/^\d{6}$/.test(otp)) return setAuthAlert('Enter the six-digit verification code.');
   clearAuthAlert();
   const btn = document.getElementById('btn-login');
   btn.disabled = true;
