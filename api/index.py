@@ -18,13 +18,13 @@ from sqlalchemy import func
 
 try:
     from .database import (
-        get_db, RosterUser, AuthSession, OTPChallenge, CourseClass,
+        get_db, RosterUser, AuthSession, CourseClass,
         ExamItem, Enrollment, Submission, hash_password, verify_password
     )
     from .omr_engine import grade_sheet_opencv
 except ImportError:
     from database import (
-        get_db, RosterUser, AuthSession, OTPChallenge, CourseClass,
+        get_db, RosterUser, AuthSession, AuthSession, CourseClass,
         ExamItem, Enrollment, Submission, hash_password, verify_password
     )
     from omr_engine import grade_sheet_opencv
@@ -205,7 +205,7 @@ def handle_api(payload: ApiPayload, request: Request, response: Response,
                     OTPChallenge.student_id == sid,
                     OTPChallenge.created_at >= now - OTP_REQUEST_WINDOW
                 ).order_by(OTPChallenge.created_at.desc()).all()
-                if recent and (now - recent[0].created_at).total_seconds() < OTP_RESEND_COOLDOWN_SECONDS:
+                if recent and (now - (recent[0].expires_at - timedelta(seconds=OTP_TTL_SECONDS))).total_seconds() < OTP_RESEND_COOLDOWN_SECONDS:
                     return {"success": True, "message": "If your ID is registered with an email address, a verification code has been sent."}
                 if len(recent) >= OTP_MAX_REQUESTS_PER_WINDOW:
                     return {"success": True, "message": "If your ID is registered with an email address, a verification code has been sent."}
@@ -244,27 +244,37 @@ def handle_api(payload: ApiPayload, request: Request, response: Response,
                 OTPChallenge.consumed_at.is_(None)
             ).order_by(OTPChallenge.created_at.desc()).with_for_update().first()
             now = datetime.utcnow()
-            if not challenge or challenge.expires_at <= now or challenge.attempts >= OTP_MAX_ATTEMPTS:
+            if not challenge:
                 return generic_error
-            challenge.attempts += 1
+            try:
+                stored_digest, attempts_text = challenge.otp_code.split(":", 1)
+                attempts = int(attempts_text)
+            except (ValueError, AttributeError):
+                return generic_error
+            if attempts >= OTP_MAX_ATTEMPTS:
+                challenge.otp_code = "CONSUMED"
+                db.commit()
+                return generic_error
+            attempts += 1
+            challenge.otp_code = f"{stored_digest}:{attempts}"
             try:
                 expected = otp_digest(sid, code)
             except RuntimeError:
                 db.rollback()
                 logger.error("ASPECT_OTP_SECRET is not configured.")
                 return {"success": False, "message": "Email sign-in is temporarily unavailable. Please contact your instructor."}
-            if not hmac.compare_digest(challenge.otp_hash, expected):
-                if challenge.attempts >= OTP_MAX_ATTEMPTS:
-                    challenge.consumed_at = now
+            if not hmac.compare_digest(stored_digest, expected):
+                if attempts >= OTP_MAX_ATTEMPTS:
+                    challenge.otp_code = "CONSUMED"
                 db.commit()
                 return generic_error
 
             account = db.query(RosterUser).filter_by(student_id=sid).first()
             if not account:
-                challenge.consumed_at = now
+                challenge.otp_code = "CONSUMED"
                 db.commit()
                 return generic_error
-            challenge.consumed_at = now
+            challenge.otp_code = "CONSUMED"
             issue_session(db, response, account.student_id)
             db.commit()
             return {"success": True, "user": public_user(account)}
