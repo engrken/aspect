@@ -7,7 +7,6 @@ import smtplib
 import hmac
 import html
 from email.message import EmailMessage
-import re
 import secrets
 import uuid
 from datetime import datetime, timedelta
@@ -25,7 +24,7 @@ try:
     from .omr_engine import grade_sheet_opencv
 except ImportError:
     from database import (
-        get_db, RosterUser, AuthSession, CourseClass,
+        get_db, RosterUser, AuthSession, OTPChallenge, CourseClass,
         ExamItem, Enrollment, Submission, hash_password, verify_password
     )
     from omr_engine import grade_sheet_opencv
@@ -200,7 +199,7 @@ def handle_api(payload: ApiPayload, request: Request, response: Response,
 
             account = db.query(RosterUser).filter_by(student_id=sid).first()
             # Keep account existence and email presence private.
-            if account and account.email and re.fullmatch(r"[^\\s@]+@[^\\s@]+\\.[^\\s@]+", account.email.strip()):
+            if account and account.email and re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", account.email.strip()):
                 now = datetime.utcnow()
                 recent = db.query(OTPChallenge).filter(
                     OTPChallenge.student_id == sid,
@@ -238,7 +237,7 @@ def handle_api(payload: ApiPayload, request: Request, response: Response,
             sid = (payload.studentId or "").strip().upper()
             code = (payload.otp or "").strip()
             generic_error = {"success": False, "message": "The verification code is invalid or expired. Request a new code and try again."}
-            if not sid or not re.fullmatch(r"\\d{6}", code):
+            if not sid or not re.fullmatch(r"\d{6}", code):
                 return generic_error
             challenge = db.query(OTPChallenge).filter(
                 OTPChallenge.student_id == sid,
@@ -317,7 +316,8 @@ def handle_api(payload: ApiPayload, request: Request, response: Response,
             pwd = (payload.password or "").strip()
 
             if name: user.full_name = name
-            if email is not None: user.email = email
+            if email and email != (user.email or "").strip().lower():
+                return {"success": False, "message": "Email address changes must be handled by your instructor so your sign-in email remains verified."}
             if pwd:
                 if not valid_password(pwd):
                     return {"success": False, "message": "Use a unique password of 12 to 128 characters."}
