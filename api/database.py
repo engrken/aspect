@@ -50,17 +50,6 @@ class AuthSession(Base):
     otp_code = Column(String, nullable=True)
     expires_at = Column(DateTime)
 
-
-class OTPChallenge(Base):
-    __tablename__ = "otp_challenges"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    student_id = Column(String, index=True, nullable=False)
-    otp_hash = Column(String, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    expires_at = Column(DateTime, nullable=False)
-    attempts = Column(Integer, default=0, nullable=False)
-    consumed_at = Column(DateTime, nullable=True)
-
 class CourseClass(Base):
     __tablename__ = "classes"
     class_id = Column(String, primary_key=True, index=True)
@@ -125,9 +114,6 @@ def ensure_seeded(db):
 
 
 def get_db():
-    # Create the OTP challenge table lazily on each serverless instance.
-    # checkfirst keeps this safe across cold starts and existing deployments.
-    OTPChallenge.__table__.create(bind=engine, checkfirst=True)
     db = SessionLocal()
     try:
         if engine.dialect.name == 'sqlite':
