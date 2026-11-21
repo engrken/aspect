@@ -62,14 +62,11 @@
       </div>
       <h3 class="fw-bold mb-2">Institutional Examination Gateway</h3>
       <p class="text-body-secondary mx-auto mb-4" style="max-width: 520px;">
-        Sign in with your ID and password, or activate your student account using the invitation code from your instructor.
+        Sign in with your institutional ID. A one-time verification code will be sent to the email address on your roster.
       </p>
       <div class="d-flex flex-wrap justify-content-center gap-2">
         <button class="btn btn-primary fw-bold px-4 py-2 btn-touch" onclick="openAuthModal('login')">
           <i class="bi bi-box-arrow-in-right me-1"></i> Sign In
-        </button>
-        <button class="btn btn-outline-primary fw-bold px-4 py-2 btn-touch" onclick="openAuthModal('register')">
-          <i class="bi bi-person-plus-fill me-1"></i> Activate student account
         </button>
       </div>
     </div>
@@ -148,7 +145,8 @@
             </div>
             <div>
               <label class="form-label small fw-bold mb-1">Email Address</label>
-              <input type="email" id="prof-email" class="form-control" placeholder="Optional">
+              <input type="email" id="prof-email" class="form-control" readonly aria-describedby="email-help">
+              <div id="email-help" class="form-text">Contact your instructor to update the email used for sign-in.</div>
             </div>
             <div>
               <label class="form-label small fw-bold mb-1">New Password (Optional)</label>
@@ -196,65 +194,32 @@
     </div>
   </div>
 
-  <!-- AUTHENTICATION & STUDENT REGISTRATION MODAL -->
+  <!-- EMAIL OTP AUTHENTICATION MODAL -->
   <div class="modal fade" id="auth-modal" data-bs-backdrop="static" data-bs-keyboard="false" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered" style="max-width: 400px;">
       <div class="modal-content border shadow-lg p-3">
         <div class="modal-body">
           <div class="d-flex justify-content-between align-items-center mb-3">
-            <ul class="nav nav-pills nav-fill flex-grow-1 me-2 bg-body-tertiary p-1 rounded" role="tablist">
-              <li class="nav-item">
-                <button class="nav-link active py-1 small fw-bold" id="tab-btn-login" type="button" onclick="switchAuthMode('login')">Sign In</button>
-              </li>
-              <li class="nav-item">
-                <button class="nav-link py-1 small fw-bold" id="tab-btn-register" type="button" onclick="switchAuthMode('register')">Activate student account</button>
-              </li>
-            </ul>
+            <h5 class="fw-bold mb-0">Sign in to ASPECT</h5>
             <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
           </div>
-
-          <div id="auth-alert" class="alert alert-danger py-1.5 px-2 small d-none mb-3 text-center"></div>
-
-          <!-- SIGN IN FORM -->
-          <form id="form-login" onsubmit="loginWithPassword(event)">
-            <div class="mb-2.5">
-              <label class="form-label small fw-bold text-body-secondary mb-1">Student / Faculty ID</label>
-              <input type="text" id="auth-id" placeholder="e.g. FACULTY-01 or 2026-0001" class="form-control font-monospace py-2 fw-semibold" autocomplete="username" required>
+          <div id="auth-alert" class="alert alert-danger py-1.5 px-2 small d-none mb-3 text-center" role="status"></div>
+          <form id="form-login" onsubmit="handleOtpLogin(event)">
+            <div class="mb-3">
+              <label class="form-label small fw-bold text-body-secondary mb-1" for="auth-id">Student / Faculty ID</label>
+              <input type="text" id="auth-id" placeholder="e.g. FACULTY-01 or 2026-0001" class="form-control font-monospace py-2 fw-semibold" autocomplete="username" maxlength="64" required>
             </div>
-            <div class="mb-3 mt-2">
-              <label class="form-label small fw-bold text-body-secondary mb-1">Password</label>
-              <div class="input-group">
-                <input type="password" id="auth-password" placeholder="••••••••" class="form-control font-monospace py-2 fw-semibold" autocomplete="current-password" required>
-                <button class="btn btn-outline-secondary" type="button" onclick="togglePasswordVisibility('auth-password', 'pwd-eye-icon')" tabindex="-1">
-                  <i class="bi bi-eye" id="pwd-eye-icon"></i>
-                </button>
-              </div>
+            <div id="otp-step" class="d-none mb-3">
+              <label class="form-label small fw-bold text-body-secondary mb-1" for="auth-otp">Six-digit verification code</label>
+              <input type="text" id="auth-otp" class="form-control form-control-lg font-monospace text-center fw-bold" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" placeholder="000000">
+              <div class="form-text">Check the email address registered with your institution. The code expires in 10 minutes.</div>
+              <button type="button" class="btn btn-link btn-sm px-0 mt-1" onclick="resetOtpForDifferentId()">Use a different ID</button>
+              <button type="button" class="btn btn-link btn-sm px-0 mt-1 ms-2" onclick="resendLoginOtp()">Resend code</button>
             </div>
             <button type="submit" id="btn-login" class="btn btn-primary w-100 fw-bold py-2 btn-touch">
-              <i class="bi bi-box-arrow-in-right me-1"></i> Sign In
+              <i class="bi bi-envelope-check me-1"></i> Send verification code
             </button>
           </form>
-
-          <!-- STUDENT INVITATION FORM -->
-          <form id="form-register" class="d-none" onsubmit="registerStudent(event)">
-            <div class="mb-2">
-              <label class="form-label small fw-bold text-body-secondary mb-1">Student ID Number</label>
-              <input type="text" id="reg-id" placeholder="e.g. 2026-0001" class="form-control font-monospace py-1.5 fw-semibold" required>
-            </div>
-            <div class="mb-3">
-              <label class="form-label small fw-bold text-body-secondary mb-1">Invitation code from your instructor</label>
-              <div class="input-group">
-                <input type="password" id="reg-password" autocomplete="one-time-code" maxlength="128" class="form-control font-monospace py-1.5 fw-semibold" required>
-                <button class="btn btn-outline-secondary" type="button" onclick="togglePasswordVisibility('reg-password', 'reg-eye-icon')" tabindex="-1">
-                  <i class="bi bi-eye" id="reg-eye-icon"></i>
-                </button>
-              </div>
-            </div>
-            <button type="submit" id="btn-register" class="btn btn-success w-100 fw-bold py-2 btn-touch">
-              <i class="bi bi-person-check-fill me-1"></i> Activate account
-            </button>
-          </form>
-
         </div>
       </div>
     </div>
@@ -276,6 +241,6 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <script src="student.js?v=10"></script>
+  <script src="student.js?v=11"></script>
 </body>
 </html>

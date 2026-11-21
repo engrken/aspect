@@ -1,7 +1,12 @@
 import base64
 import hashlib
 import logging
+import os
 import re
+import smtplib
+import hmac
+import html
+from email.message import EmailMessage
 import secrets
 import uuid
 from datetime import datetime, timedelta
@@ -36,6 +41,7 @@ LEGACY_PASSWORD_DIGESTS = {
 class ApiPayload(BaseModel):
     action: str
     studentId: Optional[str] = None
+    otp: Optional[str] = None
     password: Optional[str] = None
     newPassword: Optional[str] = None
     fullName: Optional[str] = None
@@ -74,10 +80,86 @@ def issue_session(db: Session, response: Response, student_id: str):
     db.add(AuthSession(
         token=hash_session(token),
         student_id=student_id,
-        expires_at=datetime.utcnow() + timedelta(hours=12)
+        expires_at=datetime.utcnow() + timedelta(hours=8)
     ))
-    response.set_cookie(SESSION_COOKIE, token, max_age=43200, path="/",
+    response.set_cookie(SESSION_COOKIE, token, max_age=28800, path="/",
                         secure=True, httponly=True, samesite="strict")
+
+
+OTP_TTL_SECONDS = 600
+OTP_MAX_ATTEMPTS = 5
+OTP_RESEND_COOLDOWN_SECONDS = 60
+OTP_MAX_REQUESTS_PER_WINDOW = 3
+def otp_secret() -> bytes:
+    secret = os.getenv("ASPECT_OTP_SECRET", "")
+    if len(secret) < 32:
+        raise RuntimeError("ASPECT_OTP_SECRET must be configured with at least 32 characters.")
+    return secret.encode("utf-8")
+
+def generate_otp() -> str:
+    return f"{secrets.randbelow(1000000):06d}"
+
+def otp_digest(student_id: str, otp: str) -> str:
+    message = f"{student_id.upper()}:{otp}".encode("utf-8")
+    return hmac.new(otp_secret(), message, hashlib.sha256).hexdigest()
+
+def email_delivery_configured() -> bool:
+    required = ("SMTP_HOST", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM_EMAIL")
+    if not all(os.getenv(key, "").strip() for key in required):
+        return False
+    username = os.getenv("SMTP_USERNAME", "").strip()
+    return not username or bool(os.getenv("SMTP_PASSWORD", ""))
+
+def send_login_otp_email(to_email: str, full_name: str, student_id: str, otp: str) -> None:
+    host = os.getenv("SMTP_HOST", "").strip()
+    port = int(os.getenv("SMTP_PORT", "587"))
+    username = os.getenv("SMTP_USERNAME", "").strip()
+    password = os.getenv("SMTP_PASSWORD", "")
+    sender = os.getenv("SMTP_FROM_EMAIL", "").strip()
+    message = EmailMessage()
+    message["Subject"] = "Your ASPECT sign-in verification code"
+    message["From"] = sender
+    message["To"] = to_email
+    safe_name = html.escape(full_name or "ASPECT user")
+    safe_id = html.escape(student_id)
+    message.set_content(
+        f"Hello {full_name or 'ASPECT user'},\n\n"
+        f"Your ASPECT sign-in code for ID {student_id} is {otp}. "
+        "It expires in 10 minutes. If you did not request this code, ignore this email."
+    )
+    message.add_alternative(
+        f"""<div style="font-family:Arial,sans-serif;line-height:1.6;color:#212529">
+        <h2>ASPECT Portal sign-in</h2><p>Hello <strong>{safe_name}</strong>,</p>
+        <p>Your verification code for account <strong>{safe_id}</strong> is:</p>
+        <p style="font-family:monospace;font-size:30px;font-weight:bold;letter-spacing:6px">{otp}</p>
+        <p>This code expires in 10 minutes. If you did not request it, you can ignore this message.</p>
+        </div>""",
+        subtype="html"
+    )
+    timeout = 15
+    if port == 465:
+        with smtplib.SMTP_SSL(host, port, timeout=timeout) as server:
+            if username:
+                server.login(username, password)
+            server.send_message(message)
+    else:
+        with smtplib.SMTP(host, port, timeout=timeout) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            if username:
+                server.login(username, password)
+            server.send_message(message)
+
+def public_user(account: RosterUser) -> dict:
+    return {
+        "studentId": account.student_id,
+        "email": account.email,
+        "fullName": account.full_name,
+        "section": account.section,
+        "role": account.role,
+        "mustChangePassword": False
+    }
 
 def can_access_class(db: Session, user: RosterUser, class_id: Optional[str]) -> bool:
     owner = db.query(CourseClass.owner_teacher_id).filter_by(class_id=class_id).scalar()
@@ -105,13 +187,111 @@ def handle_api(payload: ApiPayload, request: Request, response: Response,
     try:
         act = payload.action
         user = validate_token(db, token)
-        if user and user.must_change_password and act not in {
-            "LOGIN", "REGISTER_STUDENT", "VALIDATE_SESSION", "CHANGE_PASSWORD", "LOGOUT"
-        }:
-            return {"success": False, "message": "Change your temporary password to continue."}
+        if act == "SEND_OTP":
+            sid = (payload.studentId or "").strip().upper()
+            if not sid or len(sid) > 64 or not email_delivery_configured():
+                return {"success": False, "message": "Email sign-in is temporarily unavailable. Please contact your instructor."}
+            try:
+                otp_secret()
+            except RuntimeError:
+                logger.error("ASPECT_OTP_SECRET is not configured.")
+                return {"success": False, "message": "Email sign-in is temporarily unavailable. Please contact your instructor."}
 
+            account = db.query(RosterUser).filter_by(student_id=sid).first()
+            # Do not reveal whether an ID exists or has a roster email.
+            if account and account.email and re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", account.email.strip()):
+                now = datetime.utcnow()
+                # AuthSession.otp_code already exists in the production schema.
+                # OTP challenge rows are distinguished from normal sessions by a non-null otp_code.
+                db.query(AuthSession).filter(
+                    AuthSession.student_id == sid,
+                    AuthSession.otp_code.isnot(None),
+                    AuthSession.expires_at < now - timedelta(minutes=5)
+                ).delete(synchronize_session=False)
+                recent = db.query(AuthSession).filter(
+                    AuthSession.student_id == sid,
+                    AuthSession.otp_code.isnot(None),
+                    AuthSession.expires_at >= now - timedelta(minutes=5)
+                ).order_by(AuthSession.expires_at.desc()).all()
+                if recent:
+                    last_requested_at = recent[0].expires_at - timedelta(seconds=OTP_TTL_SECONDS)
+                    if (now - last_requested_at).total_seconds() < OTP_RESEND_COOLDOWN_SECONDS:
+                        return {"success": False, "message": "Please wait one minute before requesting another code."}
+                if len(recent) >= OTP_MAX_REQUESTS_PER_WINDOW:
+                    return {"success": False, "message": "Too many code requests. Please try again in 15 minutes."}
 
-        if act in {"LOGIN", "REGISTER_STUDENT"}:
+                code = generate_otp()
+                try:
+                    send_login_otp_email(account.email.strip(), account.full_name, sid, code)
+                except Exception:
+                    logger.exception("ASPECT OTP email delivery failed.")
+                    return {"success": False, "message": "Email sign-in is temporarily unavailable. Please contact your instructor."}
+
+                for old_challenge in db.query(AuthSession).filter(
+                    AuthSession.student_id == sid,
+                    AuthSession.otp_code.isnot(None),
+                    AuthSession.expires_at > now
+                ).all():
+                    old_challenge.otp_code = "SUPERSEDED"
+                db.add(AuthSession(
+                    token=hash_session(secrets.token_urlsafe(32)),
+                    student_id=sid,
+                    otp_code=f"{otp_digest(sid, code)}:0",
+                    expires_at=now + timedelta(seconds=OTP_TTL_SECONDS)
+                ))
+                db.commit()
+
+            return {"success": True, "message": "If your ID is registered with an email address, a verification code has been sent."}
+
+        elif act == "VERIFY_OTP":
+            sid = (payload.studentId or "").strip().upper()
+            code = (payload.otp or "").strip()
+            generic_error = {"success": False, "message": "The verification code is invalid or expired. Request a new code and try again."}
+            if not sid or not re.fullmatch(r"\d{6}", code):
+                return generic_error
+            now = datetime.utcnow()
+            challenge = db.query(AuthSession).filter(
+                AuthSession.student_id == sid,
+                AuthSession.otp_code.isnot(None),
+                AuthSession.otp_code.notin_(["CONSUMED", "SUPERSEDED"]),
+                AuthSession.expires_at > now
+            ).order_by(AuthSession.expires_at.desc()).with_for_update().first()
+            if not challenge:
+                return generic_error
+            try:
+                stored_digest, attempts_text = challenge.otp_code.split(":", 1)
+                attempts = int(attempts_text)
+            except (ValueError, AttributeError):
+                return generic_error
+            if attempts >= OTP_MAX_ATTEMPTS:
+                challenge.otp_code = "CONSUMED"
+                db.commit()
+                return generic_error
+            attempts += 1
+            challenge.otp_code = f"{stored_digest}:{attempts}"
+            try:
+                expected = otp_digest(sid, code)
+            except RuntimeError:
+                db.rollback()
+                logger.error("ASPECT_OTP_SECRET is not configured.")
+                return {"success": False, "message": "Email sign-in is temporarily unavailable. Please contact your instructor."}
+            if not hmac.compare_digest(stored_digest, expected):
+                if attempts >= OTP_MAX_ATTEMPTS:
+                    challenge.otp_code = "CONSUMED"
+                db.commit()
+                return generic_error
+
+            account = db.query(RosterUser).filter_by(student_id=sid).first()
+            if not account:
+                challenge.otp_code = "CONSUMED"
+                db.commit()
+                return generic_error
+            challenge.otp_code = "CONSUMED"
+            issue_session(db, response, account.student_id)
+            db.commit()
+            return {"success": True, "user": public_user(account)}
+
+        if act == "REGISTER_STUDENT":
             sid = (payload.studentId or "").strip().upper()
             password = payload.password or ""
             if not sid or not password or len(password) > 128 or is_legacy_password(password):
@@ -137,7 +317,7 @@ def handle_api(payload: ApiPayload, request: Request, response: Response,
                     "fullName": account.full_name,
                     "section": account.section,
                     "role": account.role,
-                    "mustChangePassword": bool(account.must_change_password)
+                    "mustChangePassword": False
                 }
             }
 
@@ -158,7 +338,8 @@ def handle_api(payload: ApiPayload, request: Request, response: Response,
             pwd = (payload.password or "").strip()
 
             if name: user.full_name = name
-            if email is not None: user.email = email
+            if email and email != (user.email or "").strip().lower():
+                return {"success": False, "message": "Email address changes must be handled by your instructor so your sign-in email remains verified."}
             if pwd:
                 if not valid_password(pwd):
                     return {"success": False, "message": "Use a unique password of 12 to 128 characters."}
@@ -192,7 +373,7 @@ def handle_api(payload: ApiPayload, request: Request, response: Response,
                     "fullName": user.full_name,
                     "section": user.section,
                     "role": user.role,
-                    "mustChangePassword": bool(user.must_change_password)
+                    "mustChangePassword": False
                 }
             }
 

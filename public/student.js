@@ -53,31 +53,27 @@ function toggleTheme() {
   }
 }
 
-function openAuthModal(mode = 'login') {
-  switchAuthMode(mode);
+let otpStepActive = false;
+
+function openAuthModal() {
+  resetOtpLogin();
   if (authModal) authModal.show();
 }
 
-function switchAuthMode(mode) {
-  clearAuthAlert();
-  const loginForm = document.getElementById('form-login');
-  const regForm = document.getElementById('form-register');
-  const btnLoginTab = document.getElementById('tab-btn-login');
-  const btnRegTab = document.getElementById('tab-btn-register');
-
-  if (mode === 'register') {
-    loginForm.classList.add('d-none');
-    regForm.classList.remove('d-none');
-    btnLoginTab.classList.remove('active');
-    btnRegTab.classList.add('active');
-    setTimeout(() => document.getElementById('reg-id')?.focus(), 150);
-  } else {
-    regForm.classList.add('d-none');
-    loginForm.classList.remove('d-none');
-    btnRegTab.classList.remove('active');
-    btnLoginTab.classList.add('active');
-    setTimeout(() => document.getElementById('auth-id')?.focus(), 150);
+function resetOtpLogin() {
+  otpStepActive = false;
+  const idInput = document.getElementById('auth-id');
+  const otpInput = document.getElementById('auth-otp');
+  const otpStep = document.getElementById('otp-step');
+  const button = document.getElementById('btn-login');
+  if (idInput) { idInput.disabled = false; idInput.value = ''; }
+  if (otpInput) { otpInput.value = ''; otpInput.required = false; }
+  if (otpStep) otpStep.classList.add('d-none');
+  if (button) {
+    button.disabled = false;
+    button.innerHTML = '<i class="bi bi-envelope-check me-1"></i> Send verification code';
   }
+  clearAuthAlert();
 }
 
 function togglePasswordVisibility(inputId, iconId) {
@@ -121,14 +117,7 @@ function showGuestState() {
 }
 
 function checkPasswordForce() {
-  if (currentUser && currentUser.mustChangePassword) {
-    showGuestState();
-    if (!forcePasswordModal) {
-      forcePasswordModal = new bootstrap.Modal(document.getElementById('force-password-modal'));
-    }
-    forcePasswordModal.show();
-    return true;
-  }
+  // OTP is the primary authentication method; temporary password flags no longer gate access.
   return false;
 }
 
@@ -159,44 +148,72 @@ window.addEventListener('DOMContentLoaded', () => {
   });
 });
 
-async function loginWithPassword(e) {
+async function handleOtpLogin(e) {
   if (e) e.preventDefault();
+  if (otpStepActive) return verifyLoginOtp();
+  return requestLoginOtp();
+}
+
+async function requestLoginOtp() {
   const id = document.getElementById('auth-id').value.trim();
-  const password = document.getElementById('auth-password').value;
-
-  if (!id || !password) {
-    return setAuthAlert('Please enter both your ID and password.');
-  }
-
+  if (!id) return setAuthAlert('Please enter your Student / Faculty ID.');
   clearAuthAlert();
   const btn = document.getElementById('btn-login');
   btn.disabled = true;
-  btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span> Signing In...`;
-
-  try {
-    const res = await callApi({ action: 'LOGIN', studentId: id, password: password });
-    btn.disabled = false;
-    btn.innerHTML = `<i class="bi bi-box-arrow-in-right me-1"></i> Sign In`;
-
-    if (res.success) {
-      sessionToken = true;
-      currentUser = res.user;
-      if (authModal) authModal.hide();
-
-      if (currentUser.role === 'TEACHER') {
-        window.location.href = 'teacher.html';
-      } else {
-        if (checkPasswordForce()) return;
-        initStudentDashboard();
-      }
-    } else {
-      setAuthAlert(res.message || 'Invalid ID or password.');
-    }
-  } catch (err) {
-    btn.disabled = false;
-    btn.innerHTML = `<i class="bi bi-box-arrow-in-right me-1"></i> Sign In`;
-    setAuthAlert('Connection error while contacting server.');
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Sending code...';
+  const res = await callApi({ action: 'SEND_OTP', studentId: id });
+  btn.disabled = false;
+  if (!res.success) {
+    btn.innerHTML = '<i class="bi bi-envelope-check me-1"></i> Send verification code';
+    return setAuthAlert(res.message || 'Unable to send a verification code.');
   }
+  otpStepActive = true;
+  document.getElementById('auth-id').disabled = true;
+  document.getElementById('otp-step').classList.remove('d-none');
+  document.getElementById('auth-otp').required = true;
+  btn.innerHTML = '<i class="bi bi-shield-check me-1"></i> Verify & Sign In';
+  setAuthAlert(res.message || 'If your ID is registered with an email address, a verification code has been sent.', 'info');
+  document.getElementById('auth-otp').focus();
+}
+
+async function verifyLoginOtp() {
+  const id = document.getElementById('auth-id').value.trim();
+  const otp = document.getElementById('auth-otp').value.trim();
+  if (!/^\d{6}$/.test(otp)) return setAuthAlert('Enter the six-digit verification code.');
+  clearAuthAlert();
+  const btn = document.getElementById('btn-login');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Verifying...';
+  const res = await callApi({ action: 'VERIFY_OTP', studentId: id, otp });
+  btn.disabled = false;
+  btn.innerHTML = '<i class="bi bi-shield-check me-1"></i> Verify & Sign In';
+  if (!res.success) return setAuthAlert(res.message || 'The verification code is invalid or expired.');
+  sessionToken = true;
+  currentUser = res.user;
+  if (authModal) authModal.hide();
+  if (currentUser.role === 'TEACHER') {
+    window.location.href = 'teacher.html';
+  } else {
+    initStudentDashboard();
+  }
+}
+
+async function resendLoginOtp() {
+  if (!otpStepActive) return;
+  document.getElementById('auth-otp').value = '';
+  const id = document.getElementById('auth-id').value.trim();
+  const btn = document.getElementById('btn-login');
+  btn.disabled = true;
+  const res = await callApi({ action: 'SEND_OTP', studentId: id });
+  btn.disabled = false;
+  if (!res.success) return setAuthAlert(res.message || 'Unable to resend the code.');
+  setAuthAlert(res.message || 'If your ID is registered with an email address, a verification code has been sent.', 'info');
+  document.getElementById('auth-otp').focus();
+}
+
+function resetOtpForDifferentId() {
+  resetOtpLogin();
+  document.getElementById('auth-id').focus();
 }
 
 async function submitForcedPassword(e) {
