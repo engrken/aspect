@@ -103,7 +103,7 @@ def otp_digest(student_id: str, otp: str) -> str:
     return hmac.new(otp_secret(), message, hashlib.sha256).hexdigest()
 
 def email_delivery_configured() -> bool:
-    required = ("SMTP_HOST", "SMTP_FROM_EMAIL")
+    required = ("SMTP_HOST", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM_EMAIL")
     if not all(os.getenv(key, "").strip() for key in required):
         return False
     username = os.getenv("SMTP_USERNAME", "").strip()
@@ -144,9 +144,8 @@ def send_login_otp_email(to_email: str, full_name: str, student_id: str, otp: st
     else:
         with smtplib.SMTP(host, port, timeout=timeout) as server:
             server.ehlo()
-            if os.getenv("SMTP_USE_TLS", "true").lower() not in {"0", "false", "no"}:
-                server.starttls()
-                server.ehlo()
+            server.starttls()
+            server.ehlo()
             if username:
                 server.login(username, password)
             server.send_message(message)
