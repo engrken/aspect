@@ -90,13 +90,14 @@ OTP_TTL_SECONDS = 600
 OTP_MAX_ATTEMPTS = 5
 OTP_RESEND_COOLDOWN_SECONDS = 60
 OTP_MAX_REQUESTS_PER_WINDOW = 3
-OTP_REQUEST_WINDOW = timedelta(minutes=15)
-
 def otp_secret() -> bytes:
     secret = os.getenv("ASPECT_OTP_SECRET", "")
     if len(secret) < 32:
         raise RuntimeError("ASPECT_OTP_SECRET must be configured with at least 32 characters.")
     return secret.encode("utf-8")
+
+def generate_otp() -> str:
+    return f"{secrets.randbelow(1000000):06d}"
 
 def otp_digest(student_id: str, otp: str) -> str:
     message = f"{student_id.upper()}:{otp}".encode("utf-8")
@@ -219,7 +220,7 @@ def handle_api(payload: ApiPayload, request: Request, response: Response,
                 if len(recent) >= OTP_MAX_REQUESTS_PER_WINDOW:
                     return {"success": False, "message": "Too many code requests. Please try again in 15 minutes."}
 
-                code = f"{secrets.randbelow(1000000):06d}"
+                code = generate_otp()
                 try:
                     send_login_otp_email(account.email.strip(), account.full_name, sid, code)
                 except Exception:
