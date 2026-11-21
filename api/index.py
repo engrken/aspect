@@ -24,7 +24,7 @@ try:
     from .omr_engine import grade_sheet_opencv
 except ImportError:
     from database import (
-        get_db, RosterUser, AuthSession, AuthSession, CourseClass,
+        get_db, RosterUser, AuthSession, CourseClass,
         ExamItem, Enrollment, Submission, hash_password, verify_password
     )
     from omr_engine import grade_sheet_opencv
@@ -198,17 +198,27 @@ def handle_api(payload: ApiPayload, request: Request, response: Response,
                 return {"success": False, "message": "Email sign-in is temporarily unavailable. Please contact your instructor."}
 
             account = db.query(RosterUser).filter_by(student_id=sid).first()
-            # Keep account existence and email presence private.
+            # Do not reveal whether an ID exists or has a roster email.
             if account and account.email and re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", account.email.strip()):
                 now = datetime.utcnow()
-                recent = db.query(OTPChallenge).filter(
-                    OTPChallenge.student_id == sid,
-                    OTPChallenge.created_at >= now - OTP_REQUEST_WINDOW
-                ).order_by(OTPChallenge.created_at.desc()).all()
-                if recent and (now - (recent[0].expires_at - timedelta(seconds=OTP_TTL_SECONDS))).total_seconds() < OTP_RESEND_COOLDOWN_SECONDS:
-                    return {"success": True, "message": "If your ID is registered with an email address, a verification code has been sent."}
+                # AuthSession.otp_code already exists in the production schema.
+                # OTP challenge rows are distinguished from normal sessions by a non-null otp_code.
+                db.query(AuthSession).filter(
+                    AuthSession.student_id == sid,
+                    AuthSession.otp_code.isnot(None),
+                    AuthSession.expires_at < now - timedelta(minutes=5)
+                ).delete(synchronize_session=False)
+                recent = db.query(AuthSession).filter(
+                    AuthSession.student_id == sid,
+                    AuthSession.otp_code.isnot(None),
+                    AuthSession.expires_at >= now - timedelta(minutes=5)
+                ).order_by(AuthSession.expires_at.desc()).all()
+                if recent:
+                    last_requested_at = recent[0].expires_at - timedelta(seconds=OTP_TTL_SECONDS)
+                    if (now - last_requested_at).total_seconds() < OTP_RESEND_COOLDOWN_SECONDS:
+                        return {"success": False, "message": "Please wait one minute before requesting another code."}
                 if len(recent) >= OTP_MAX_REQUESTS_PER_WINDOW:
-                    return {"success": True, "message": "If your ID is registered with an email address, a verification code has been sent."}
+                    return {"success": False, "message": "Too many code requests. Please try again in 15 minutes."}
 
                 code = f"{secrets.randbelow(1000000):06d}"
                 try:
@@ -217,17 +227,17 @@ def handle_api(payload: ApiPayload, request: Request, response: Response,
                     logger.exception("ASPECT OTP email delivery failed.")
                     return {"success": False, "message": "Email sign-in is temporarily unavailable. Please contact your instructor."}
 
-                for old_challenge in db.query(OTPChallenge).filter(
-                    OTPChallenge.student_id == sid,
-                    OTPChallenge.consumed_at.is_(None)
+                for old_challenge in db.query(AuthSession).filter(
+                    AuthSession.student_id == sid,
+                    AuthSession.otp_code.isnot(None),
+                    AuthSession.expires_at > now
                 ).all():
-                    old_challenge.consumed_at = now
-                db.add(OTPChallenge(
+                    old_challenge.otp_code = "SUPERSEDED"
+                db.add(AuthSession(
+                    token=hash_session(secrets.token_urlsafe(32)),
                     student_id=sid,
-                    otp_hash=otp_digest(sid, code),
-                    created_at=now,
-                    expires_at=now + timedelta(seconds=OTP_TTL_SECONDS),
-                    attempts=0
+                    otp_code=f"{otp_digest(sid, code)}:0",
+                    expires_at=now + timedelta(seconds=OTP_TTL_SECONDS)
                 ))
                 db.commit()
 
@@ -239,11 +249,13 @@ def handle_api(payload: ApiPayload, request: Request, response: Response,
             generic_error = {"success": False, "message": "The verification code is invalid or expired. Request a new code and try again."}
             if not sid or not re.fullmatch(r"\d{6}", code):
                 return generic_error
-            challenge = db.query(OTPChallenge).filter(
-                OTPChallenge.student_id == sid,
-                OTPChallenge.consumed_at.is_(None)
-            ).order_by(OTPChallenge.created_at.desc()).with_for_update().first()
             now = datetime.utcnow()
+            challenge = db.query(AuthSession).filter(
+                AuthSession.student_id == sid,
+                AuthSession.otp_code.isnot(None),
+                AuthSession.otp_code.notin_(["CONSUMED", "SUPERSEDED"]),
+                AuthSession.expires_at > now
+            ).order_by(AuthSession.expires_at.desc()).with_for_update().first()
             if not challenge:
                 return generic_error
             try:
