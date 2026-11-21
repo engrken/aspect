@@ -1,5 +1,4 @@
 import os
-import re
 import unittest
 
 os.environ["ASPECT_OTP_SECRET"] = "unit-test-secret-that-is-at-least-32-bytes-long"
