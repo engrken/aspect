@@ -125,6 +125,9 @@ def ensure_seeded(db):
 
 
 def get_db():
+    # Create the OTP challenge table lazily on each serverless instance.
+    # checkfirst keeps this safe across cold starts and existing deployments.
+    OTPChallenge.__table__.create(bind=engine, checkfirst=True)
     db = SessionLocal()
     try:
         if engine.dialect.name == 'sqlite':
